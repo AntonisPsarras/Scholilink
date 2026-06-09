@@ -1,0 +1,99 @@
+name: student_dashboard
+description: ScholiLink — Flutter student dashboard with Firebase, Riverpod, and AI-backed Cloud Functions.
+publish_to: 'none'
+version: 1.0.0+1
+
+environment:
+  sdk: '>=3.10.3 <4.0.0'
+
+dependencies:
+  flutter:
+    sdk: flutter
+  flutter_localizations:
+    sdk: flutter
+  firebase_core: ^4.10.0
+  firebase_auth: ^6.5.2
+  cloud_firestore: ^6.5.0
+  cloud_functions: ^6.3.2
+  flutter_riverpod: ^2.6.1
+  intl: ^0.20.2
+  google_fonts: ^8.1.0
+  google_sign_in: ^7.2.0
+  image: ^4.9.1
+  cross_file: ^0.3.4+2
+  image_picker: ^1.2.2
+  record: ^6.2.1
+  audioplayers: ^6.7.1
+  path_provider: ^2.1.5
+  uuid: ^4.5.1
+  fl_chart: ^1.2.0
+  firebase_storage: ^13.4.2
+  firebase_messaging: ^16.3.0
+  flutter_local_notifications: ^18.0.1
+  shared_preferences: ^2.5.4
+  timezone: ^0.9.4
+  flutter_markdown_plus: ^1.0.3
+  http: ^1.6.0
+  web: ^1.1.0
+  google_sign_in_web: ^1.1.3
+  image_cropper: ^12.2.1
+  cached_network_image: ^3.4.1
+  url_launcher: ^6.3.2
+  device_calendar: ^4.3.3
+  flutter_dotenv: ^6.0.1
+  shimmer: ^3.0.0
+  screenshot: ^3.0.0
+  rxdart: ^0.28.0
+  permission_handler: ^12.0.3
+  gal: ^2.3.2
+  universal_html: ^2.3.0
+  flutter_secure_storage: ^10.3.1
+  app_links: ^7.0.0
+  share_plus: ^12.0.2
+  flutter_svg: ^2.3.0
+
+dev_dependencies:
+  flutter_test:
+    sdk: flutter
+  flutter_lints: ^6.0.0
+  firebase_core_platform_interface: ^7.0.1
+  flutter_launcher_icons: ^0.14.4
+
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: assets/branding/app_icon.png
+
+flutter_native_splash:
+  color: "#00416A"
+  image: assets/branding/splash_logo.png
+  android: true
+  ios: true
+  web: true
+  fullscreen: true
+  android_gravity: fill
+  ios_content_mode: scaleAspectFill
+  web_image_mode: cover
+  android_12:
+    color: "#00416A"
+    icon_background_color: "#00416A"
+
+flutter:
+  uses-material-design: true
+  generate: true
+  assets:
+    # Listed explicitly — folder-based asset entries ignore dotfiles (see Flutter asset docs).
+    - assets/.env
+    - assets/.env.example
+    - assets/google_fonts/
+    - assets/images/
+    - assets/branding/
+    - assets/avatars/avatar_mountain.svg
+    - assets/avatars/avatar_sailboat.svg
+    - assets/avatars/avatar_camera.svg
+    - assets/avatars/avatar_book.svg
+    - assets/avatars/avatar_bicycle.svg
+    - assets/avatars/avatar_coffee.svg
+    - assets/avatars/avatar_headphones.svg
+    - assets/avatars/avatar_plant.svg
+    - assets/avatars/avatar_starry_night.svg

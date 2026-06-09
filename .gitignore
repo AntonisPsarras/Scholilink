@@ -1,0 +1,107 @@
+# Miscellaneous
+*.class
+*.log
+*.pyc
+*.swp
+.DS_Store
+Thumbs.db
+Desktop.ini
+temp.txt
+.atom/
+.build/
+.buildlog/
+.history
+.svn/
+.swiftpm/
+migrate_working_dir/
+
+# IntelliJ related
+*.iml
+*.ipr
+*.iws
+.idea/
+
+# VS Code / Cursor — launch.json may contain --dart-define API keys
+.vscode/launch.json
+.vscode/*.code-snippets
+.cursor/
+
+# Flutter/Dart/Pub related
+**/doc/api/
+**/ios/Flutter/.last_build_id
+.dart_tool/
+.flutter-plugins
+.flutter-plugins-dependencies
+.pub-cache/
+.pub/
+/build/
+/coverage/
+
+# Symbolication related
+app.*.symbols
+
+# Obfuscation related
+app.*.map.json
+
+# Flutter auto-generated plugin registry (do not commit)
+**/GeneratedPluginRegistrant.java
+
+# Android Studio will place build artifacts here
+/android/app/debug
+/android/app/profile
+/android/app/release
+
+# Firebase — client config & generated options (use assets/.env.example templates)
+google-services.json
+**/google-services.json
+GoogleService-Info.plist
+**/GoogleService-Info.plist
+firebase_options.dart
+lib/firebase_options.dart
+
+# Firebase CLI / emulator debug logs
+firestore-debug.log
+firebase-debug.log
+ui-debug.log
+database-debug.log
+pubsub-debug.log
+functions/*-debug.log
+
+# Custom build logs
+build_output*.txt
+
+# Secrets & local config (never commit real keys)
+lib/shared/secrets.dart
+.firebase/
+assets/.env
+.env
+.env.*
+.env.local
+.env.*.local
+assets/.env.local
+# Keep template / demo files in version control (no real secrets).
+# assets/.env.demo and functions/.env.demo use LOCAL_DEMO_MODE=true — safe to commit.
+# Exception rules must come AFTER the ignore rules they override.
+!assets/.env.example
+!assets/.env.demo
+!.env.example
+
+# Service accounts & signing material
+**/serviceAccount*.json
+**/*-firebase-adminsdk-*.json
+*.pem
+*.p12
+**/key.properties
+*.jks
+*.keystore
+
+# Node / Firebase Cloud Functions
+node_modules/
+functions/node_modules/
+functions/lib/
+functions/.runtimeconfig.json
+functions/.env
+functions/.env.*
+functions/.env.local
+!functions/.env.example
+!functions/.env.demo

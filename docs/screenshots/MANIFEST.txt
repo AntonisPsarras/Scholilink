@@ -1,0 +1,26 @@
+ScholiLink marketing screenshots (PNG or WebP). Save files in this folder using these exact names so the README gallery renders on GitHub.
+
+Light mode
+----------
+login-light.png              Welcome + email / password + Google + language toggle
+home-light.png               Personalized home: Sparks, glass calendar, tomorrow's tasks, subject chips
+schedule-light.png           Weekly timetable, "next class" card, day selector
+social-light.png             Classes & friends hub (tabs, peer list, messaging affordances)
+profile-light.png            Profile, Sparks, grade band, lessons / absences / private lessons cards
+
+Dark mode
+---------
+home-dark.png                Greeting, Sparks, month calendar (exams vs deadlines), courses
+home-down-dark.png           Same home in dark mode, scrolled down to show deeper dashboard content
+schedule-dark.png            School schedule list with day tabs and edit affordances
+schedule-quick-access-dark.png   Quick Access sheet: Smart Notes, AI Assistant, Add Exam shortcuts
+progress-insights-dark.png   Focused analytics card: tomorrow's tasks plus interactive grade trend chart
+workflow-list-dark.png       Task feed grouped by due date with inline edit / delete actions
+workflow-create-dark.png     New task flow: AI description scan, media attachments, post action
+task-history-dark.png        Year filter, completed vs pending stats, per-subject stacks
+tests-exams-dark.png         Add grade / exam form plus historical results list
+ai-assistant-dark.png        AI Study Assistant chat, quota/credits, multimodal input bar
+smart-notes-dark.png         Smart Notes experience powered by the in-app AI tooling (dark mode)
+group-chat-dark.png          Class / group chat: text, voice notes, polls, rich composer
+social-dark.png              Classes / friends style social hub in dark mode
+profile-down-dark.png        Profile in dark mode, scrolled down to show additional profile sections

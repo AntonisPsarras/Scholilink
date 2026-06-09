@@ -1,0 +1,116 @@
+rules_version = '2';
+service firebase.storage {
+  match /b/{bucket}/o {
+    function smallEnough() {
+      return request.resource == null || request.resource.size < 10 * 1024 * 1024;
+    }
+
+    function isClassroomMember(classroomId) {
+      let path = /databases/(default)/documents/classrooms/$(classroomId);
+      return firestore.exists(path)
+        && request.auth.uid in firestore.get(path).data.get('members', []);
+    }
+
+    function isDirectChatParticipant(chatId) {
+      let path = /databases/(default)/documents/direct_chats/$(chatId);
+      return firestore.exists(path)
+        && request.auth.uid in firestore.get(path).data.get('participants', []);
+    }
+
+    // Profile pictures are visible to all signed-in peers (shown in social/search UI).
+    match /profile_pictures/{uid}/{fileName} {
+      allow read: if request.auth != null;
+      allow write: if request.auth != null && request.auth.uid == uid && smallEnough();
+    }
+
+    // Homework uploads are private to the owning student (academic integrity).
+    match /homework_images/{uid}/{fileName} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+      allow write: if request.auth != null && request.auth.uid == uid && smallEnough();
+    }
+    match /homework_voice/{uid}/{fileName} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+      allow write: if request.auth != null && request.auth.uid == uid && smallEnough();
+    }
+
+    // Classroom / chat media — path: folder/{uid}/{contextId}/{fileName}
+    // Writes are uid-scoped (no cross-service Firestore lookup on upload).
+    match /classroom_images/{uid}/{contextId}/{fileName} {
+      allow write: if request.auth != null && request.auth.uid == uid && smallEnough();
+      allow read: if request.auth != null && (
+        request.auth.uid == uid
+        || isClassroomMember(contextId)
+      );
+    }
+    match /chat_images/{uid}/{contextId}/{fileName} {
+      allow write: if request.auth != null && request.auth.uid == uid && smallEnough();
+      allow read: if request.auth != null && (
+        request.auth.uid == uid
+        || isClassroomMember(contextId)
+      );
+    }
+    match /chat_voice/{uid}/{contextId}/{fileName} {
+      allow write: if request.auth != null && request.auth.uid == uid && smallEnough();
+      allow read: if request.auth != null && (
+        request.auth.uid == uid
+        || isClassroomMember(contextId)
+      );
+    }
+    match /direct_chat_images/{uid}/{contextId}/{fileName} {
+      allow write: if request.auth != null && request.auth.uid == uid && smallEnough();
+      allow read: if request.auth != null && (
+        request.auth.uid == uid
+        || isDirectChatParticipant(contextId)
+      );
+    }
+    match /direct_chat_voice/{uid}/{contextId}/{fileName} {
+      allow write: if request.auth != null && request.auth.uid == uid && smallEnough();
+      allow read: if request.auth != null && (
+        request.auth.uid == uid
+        || isDirectChatParticipant(contextId)
+      );
+    }
+
+    // Legacy chat-scoped paths (folder/{contextId}/{fileName}) — read-only.
+    match /classroom_images/{scopeId}/{fileName} {
+      allow read: if request.auth != null && (
+        request.auth.uid == scopeId
+        || isClassroomMember(scopeId)
+      );
+      allow write: if false;
+    }
+    match /chat_images/{scopeId}/{fileName} {
+      allow read: if request.auth != null && (
+        request.auth.uid == scopeId
+        || isClassroomMember(scopeId)
+      );
+      allow write: if false;
+    }
+    match /chat_voice/{scopeId}/{fileName} {
+      allow read: if request.auth != null && (
+        request.auth.uid == scopeId
+        || isClassroomMember(scopeId)
+      );
+      allow write: if false;
+    }
+    match /direct_chat_images/{scopeId}/{fileName} {
+      allow read: if request.auth != null && (
+        request.auth.uid == scopeId
+        || isDirectChatParticipant(scopeId)
+      );
+      allow write: if false;
+    }
+    match /direct_chat_voice/{scopeId}/{fileName} {
+      allow read: if request.auth != null && (
+        request.auth.uid == scopeId
+        || isDirectChatParticipant(scopeId)
+      );
+      allow write: if false;
+    }
+
+    match /ai_uploads/{uid}/{feature}/{sessionId}/{fileName} {
+      allow read: if request.auth != null && request.auth.uid == uid;
+      allow write: if request.auth != null && request.auth.uid == uid && smallEnough();
+    }
+  }
+}

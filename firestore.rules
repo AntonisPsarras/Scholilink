@@ -1,0 +1,426 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Align with client [kAppDefaultCurrentClassId] when profile field is unset.
+    // Must not call get() on a missing user doc — that fails the whole rule check.
+    function userCurrentClass() {
+      let p = /databases/$(database)/documents/users/$(request.auth.uid);
+      return exists(p)
+        ? (
+            'currentClass' in get(p).data && get(p).data.currentClass != null
+              ? get(p).data.currentClass
+              : 'A-Lykeio-General'
+          )
+        : 'A-Lykeio-General';
+    }
+
+    function classroomDoc(classroomId) {
+      return get(/databases/$(database)/documents/classrooms/$(classroomId)).data;
+    }
+
+    function scheduleParentClass(scheduleId) {
+      return get(/databases/$(database)/documents/schedules/$(scheduleId)).data.classId;
+    }
+
+    function userNotBanned() {
+      let p = /databases/$(database)/documents/users/$(request.auth.uid);
+      return !exists(p)
+        || !('isBannedUntil' in get(p).data)
+        || get(p).data.isBannedUntil == null
+        || get(p).data.isBannedUntil <= request.time;
+    }
+
+    function usersAreFriends(otherUid) {
+      let me = /databases/$(database)/documents/users/$(request.auth.uid);
+      return exists(me)
+        && otherUid is string
+        && otherUid.size() > 0
+        && otherUid in get(me).data.get('friends', []);
+    }
+
+    function directChatOtherParticipant(participants) {
+      return participants.size() == 2
+        && participants[0] == request.auth.uid
+          ? participants[1]
+          : participants[0];
+    }
+
+    /// Personal-homework calendar mirror doc id: `hwcal_{authUid}_{personalHomeworkDocId}` (current),
+    /// or legacy `hwcal_{personalHomeworkDocId}` only. The uid-scoped form avoids cross-user collisions
+    /// on top-level `deadlines` (Firestore `.add()` ids are unique per subcollection, not globally).
+    function personalHwCalendarMirrorDocIdMatches(deadlineDocId, src) {
+      return deadlineDocId == 'hwcal_' + request.auth.uid + '_' + src
+        || deadlineDocId == 'hwcal_' + src;
+    }
+
+    /// Calendar row synced from personal homework ([calendarDeadlineDocIdFromPersonalHomework]).
+    /// Author must match. We intentionally do not use exists() on create — id + authorUid already
+    /// limits abuse to the signed-in user.
+    function isPersonalHomeworkCalendarMirrorCreate(deadlineDocId) {
+      let src = request.resource.data.sourcePersonalHomeworkId;
+      return request.resource.data.authorUid == request.auth.uid
+        && src is string
+        && src.size() > 0
+        && personalHwCalendarMirrorDocIdMatches(deadlineDocId, src);
+    }
+
+    /// [set] on an existing deadline is an update — legacy hwcal_* rows may lack authorUid.
+    function isPersonalHomeworkCalendarMirrorUpdate(deadlineDocId) {
+      let srcReq = request.resource.data.sourcePersonalHomeworkId;
+      return request.resource.data.authorUid == request.auth.uid
+        && srcReq is string
+        && srcReq.size() > 0
+        && personalHwCalendarMirrorDocIdMatches(deadlineDocId, srcReq)
+        && (
+          !('sourcePersonalHomeworkId' in resource.data)
+          || resource.data.sourcePersonalHomeworkId == srcReq
+        );
+    }
+
+    /// Delete calendar mirror rows tied to personal homework (handles legacy docs without authorUid).
+    function canDeletePersonalHomeworkCalendarMirror(deadlineDocId) {
+      return 'sourcePersonalHomeworkId' in resource.data
+        && resource.data.sourcePersonalHomeworkId is string
+        && resource.data.sourcePersonalHomeworkId.size() > 0
+        && personalHwCalendarMirrorDocIdMatches(deadlineDocId, resource.data.sourcePersonalHomeworkId)
+        && exists(/databases/$(database)/documents/users/$(request.auth.uid)/personal_homework/$(resource.data.sourcePersonalHomeworkId));
+    }
+
+    /// Keys allowed on `user_public/{uid}` (must match client [userPublicFieldKeys]).
+    function userPublicKeysOk() {
+      return request.resource.data.keys().hasOnly([
+        'uid',
+        'fullName',
+        'currentClass',
+        'profilePictureUrl',
+        'bio',
+        'achievements',
+        'showBio',
+        'showAchievements',
+        'shareGrades',
+        'preferredLanguage',
+        'schoolRole',
+        'isProfileComplete'
+      ]);
+    }
+
+    /// Server-only (Admin SDK / Cloud Functions). Never readable or writable from clients.
+    match /user_private/{userId} {
+      allow read, write: if false;
+    }
+
+    /// Searchable / peer-visible profile subset. No emails, consent tokens, or billing fields.
+    match /user_public/{userId} {
+      allow read: if request.auth != null;
+      allow create: if request.auth != null
+        && request.auth.uid == userId
+        && request.resource.data.uid == userId
+        && userPublicKeysOk();
+      allow update: if request.auth != null
+        && request.auth.uid == userId
+        && request.resource.data.uid == userId
+        && userPublicKeysOk()
+        && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['currentClass']);
+      allow delete: if request.auth != null && request.auth.uid == userId;
+    }
+
+    match /users/{userId} {
+      allow read: if request.auth != null && request.auth.uid == userId;
+
+      // schoolRole must be 'student' on self-create; elevation to 'teacher' is server-only.
+      allow create: if request.auth != null && request.auth.uid == userId
+                    && (!('schoolRole' in request.resource.data)
+                        || request.resource.data.schoolRole == 'student');
+
+      // Block client writes to server-controlled billing, AI quota, moderation, consent,
+      // compliance, and currentClass (grade band changes go through Cloud Functions).
+      allow update: if request.auth != null && request.auth.uid == userId
+                    && !request.resource.data.diff(resource.data).affectedKeys()
+                        .hasAny([
+                          'aiSparks',
+                          'subscriptionType',
+                          'lastSparksRefresh',
+                          'safetyScore',
+                          'offenseCount',
+                          'reportsCount',
+                          'isBannedUntil',
+                          'consentToken',
+                          'parentEmail',
+                          'consentVerificationStatus',
+                          'hasParentalConsent',
+                          'birthDate',
+                          'schoolRole',
+                          'currentClass'
+                        ]);
+
+      match /{document=**} {
+        allow read, write: if request.auth != null && request.auth.uid == userId;
+      }
+    }
+
+    match /homework_posts/{postId} {
+      allow read: if request.auth != null
+        && resource.data.classId == userCurrentClass();
+      allow create: if request.auth != null
+        && userNotBanned()
+        && request.resource.data.authorId == request.auth.uid
+        && request.resource.data.classId == userCurrentClass();
+      allow delete: if request.auth != null && resource.data.authorId == request.auth.uid;
+      allow update: if request.auth != null && (
+        (resource.data.authorId == request.auth.uid && request.resource.data.authorId == resource.data.authorId)
+        || (
+          resource.data.classId == userCurrentClass()
+          && request.auth.uid != resource.data.authorId
+          && resource.data.authorId == request.resource.data.authorId
+          && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['verifiedBy', 'verificationCount', 'isVerified', 'isOfficial'])
+        )
+        || (
+          resource.data.classId == userCurrentClass()
+          && request.auth.uid != resource.data.authorId
+          && resource.data.authorId == request.resource.data.authorId
+          && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['flaggedFalse', 'verifiedBy', 'verificationCount', 'isVerified', 'isOfficial'])
+        )
+      );
+    }
+
+    match /schedules/{scheduleId} {
+      allow read: if request.auth != null
+        && resource.data.classId == userCurrentClass();
+      allow create, update: if request.auth != null
+        && request.resource.data.classId == userCurrentClass()
+        && request.resource.data.lastUpdatedByUid == request.auth.uid;
+
+      match /temporary_schedules/{tempId} {
+        allow read: if request.auth != null
+          && scheduleParentClass(scheduleId) == userCurrentClass();
+        allow create: if request.auth != null && request.resource.data.createdByUid == request.auth.uid;
+        allow delete: if request.auth != null && resource.data.createdByUid == request.auth.uid;
+      }
+    }
+
+    match /exams/{examId} {
+      allow read: if request.auth != null
+        && resource.data.classId == userCurrentClass();
+      allow create: if request.auth != null
+        && request.resource.data.authorUid == request.auth.uid
+        && request.resource.data.classId == userCurrentClass();
+      allow update: if request.auth != null && resource.data.authorUid == request.auth.uid;
+      allow delete: if request.auth != null && (
+        resource.data.authorUid == request.auth.uid
+        || (
+          resource.data.authorUid == null
+          && resource.data.classId == userCurrentClass()
+        )
+      );
+    }
+
+    match /deadlines/{deadlineId} {
+      allow read: if request.auth != null
+        && (
+          resource.data.classId == userCurrentClass()
+          || ('authorUid' in resource.data && resource.data.authorUid == request.auth.uid)
+        );
+      allow create: if request.auth != null
+        && request.resource.data.authorUid == request.auth.uid
+        && (
+          request.resource.data.classId == userCurrentClass()
+          || isPersonalHomeworkCalendarMirrorCreate(deadlineId)
+        );
+      allow update: if request.auth != null && (
+        resource.data.authorUid == request.auth.uid
+        || isPersonalHomeworkCalendarMirrorUpdate(deadlineId)
+      );
+      allow delete: if request.auth != null && (
+        resource.data.authorUid == request.auth.uid
+        || (
+          resource.data.authorUid == null
+          && resource.data.classId == userCurrentClass()
+        )
+        || canDeletePersonalHomeworkCalendarMirror(deadlineId)
+      );
+    }
+
+    match /classrooms/{classroomId} {
+      allow create: if request.auth != null
+        && request.auth.uid in request.resource.data.adminIds
+        && request.auth.uid in request.resource.data.members;
+
+      allow read: if request.auth != null
+        && request.auth.uid in resource.data.members;
+
+      // Admins can change anything except inviteCode theft from non-admins below.
+      // Joining via invite code is server-only (classroomJoinWithInviteCode callable).
+      // Non-admin members may only update display fields (name, description, etc.);
+      // adminIds is blocked to prevent self-promotion to admin.
+      allow update: if request.auth != null && (
+        request.auth.uid in resource.data.adminIds
+        || (
+          request.auth.uid in resource.data.members
+          && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['inviteCode', 'members', 'adminIds'])
+        )
+      );
+
+      allow delete: if request.auth != null && request.auth.uid in resource.data.adminIds;
+
+      match /homework_feed/{postId} {
+        allow read: if request.auth != null
+          && request.auth.uid in classroomDoc(classroomId).members;
+        allow create: if request.auth != null
+          && userNotBanned()
+          && request.auth.uid in classroomDoc(classroomId).members
+          && request.resource.data.authorId == request.auth.uid;
+        allow delete: if request.auth != null
+          && request.auth.uid in classroomDoc(classroomId).members
+          && resource.data.authorId == request.auth.uid;
+        allow update: if request.auth != null
+          && request.auth.uid in classroomDoc(classroomId).members
+          && resource.data.authorId == request.resource.data.authorId
+          && (
+            (
+              resource.data.authorId != request.auth.uid
+              && request.resource.data.diff(resource.data).affectedKeys()
+                .hasOnly(['verifiedBy', 'verificationCount', 'isVerified', 'isOfficial'])
+            )
+            || (
+              resource.data.authorId != request.auth.uid
+              && request.resource.data.diff(resource.data).affectedKeys()
+                .hasOnly(['flaggedFalse', 'verifiedBy', 'verificationCount', 'isVerified', 'isOfficial'])
+            )
+            || (
+              resource.data.authorId == request.auth.uid
+              && request.resource.data.authorId == request.auth.uid
+              && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['authorId'])
+            )
+          );
+      }
+
+      match /messages/{messageId} {
+        allow read: if request.auth != null && request.auth.uid in classroomDoc(classroomId).members;
+        allow create: if request.auth != null
+          && userNotBanned()
+          && request.auth.uid in classroomDoc(classroomId).members
+          && request.resource.data.authorId == request.auth.uid;
+        allow delete: if request.auth != null
+          && request.auth.uid in classroomDoc(classroomId).members
+          && resource.data.authorId == request.auth.uid;
+        // Author may edit/delete own messages; peers may verify/disapprove academic posts.
+        allow update: if request.auth != null
+          && request.auth.uid in classroomDoc(classroomId).members
+          && request.resource.data.authorId == resource.data.authorId
+          && (
+            resource.data.authorId == request.auth.uid
+            || (
+              resource.data.authorId != request.auth.uid
+              && request.resource.data.diff(resource.data).affectedKeys()
+                .hasOnly(['verifiedBy', 'disapprovedBy', 'isBroadcasted'])
+            )
+          );
+      }
+
+      match /polls/{pollId} {
+        allow read: if request.auth != null
+          && request.auth.uid in classroomDoc(classroomId).members;
+        allow create: if request.auth != null
+          && userNotBanned()
+          && request.auth.uid in classroomDoc(classroomId).members
+          && request.resource.data.creatorId == request.auth.uid;
+        allow delete: if request.auth != null
+          && request.auth.uid in classroomDoc(classroomId).members
+          && resource.data.creatorId == request.auth.uid;
+        allow update: if request.auth != null
+          && request.auth.uid in classroomDoc(classroomId).members
+          && resource.data.creatorId == request.resource.data.creatorId
+          && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['options']);
+      }
+    }
+
+    // Legacy collection — friend graph lives on user docs; callables own mutations.
+    match /friendships/{friendshipId} {
+      allow read, write: if false;
+    }
+
+    match /direct_chats/{chatId} {
+      allow read: if request.auth != null && request.auth.uid in resource.data.participants;
+      allow create: if request.auth != null
+        && userNotBanned()
+        && request.auth.uid in request.resource.data.participants
+        && request.resource.data.participants.size() == 2
+        && usersAreFriends(
+          directChatOtherParticipant(request.resource.data.participants)
+        );
+      // Participants may only update conversation-level metadata fields that
+      // DirectMessageService writes. Neither participant may delete the shared
+      // document from the client (clearConversation only wipes sub-documents).
+      // Field names verified against every .update() call in direct_message_service.dart.
+      allow update: if request.auth != null
+        && request.auth.uid in resource.data.participants
+        && request.resource.data.diff(resource.data).affectedKeys()
+            .hasOnly(['lastMessageText', 'lastMessageSenderId', 'lastMessageTime',
+                      'updatedAt', 'unreadCounts']);
+      allow delete: if false;
+
+      match /messages/{messageId} {
+        allow read: if request.auth != null
+          && request.auth.uid in get(/databases/$(database)/documents/direct_chats/$(chatId)).data.participants;
+        allow create: if request.auth != null
+          && userNotBanned()
+          && request.auth.uid in get(/databases/$(database)/documents/direct_chats/$(chatId)).data.participants
+          && request.auth.uid == request.resource.data.senderId
+          && usersAreFriends(
+            directChatOtherParticipant(
+              get(/databases/$(database)/documents/direct_chats/$(chatId)).data.participants
+            )
+          );
+        allow update: if request.auth != null
+          && request.auth.uid in get(/databases/$(database)/documents/direct_chats/$(chatId)).data.participants
+          && resource.data.senderId == request.auth.uid;
+        // Allow either participant to clear conversation history.
+        allow delete: if request.auth != null
+          && request.auth.uid in get(/databases/$(database)/documents/direct_chats/$(chatId)).data.participants;
+      }
+    }
+
+    match /reports/{reportId} {
+      allow create: if request.auth != null && request.resource.data.reporterId == request.auth.uid;
+      allow read: if request.auth != null && resource.data.reporterId == request.auth.uid;
+      allow update, delete: if false;
+    }
+
+    // Rate-limit metadata for unauthenticated consent verification (server-only writes).
+    match /consent_verify_attempts/{docId} {
+      allow read, write: if false;
+    }
+
+    // ExamIQ attempts: scoped strictly to the owner's userId field.
+    // Cloud Functions write via Admin SDK (bypasses rules). Client writes must set userId == uid.
+    match /quiz_attempts/{attemptId} {
+      allow create: if request.auth != null
+        && request.resource.data.userId == request.auth.uid;
+      allow read, update, delete: if request.auth != null
+        && resource.data.userId == request.auth.uid;
+    }
+
+    // ExamIQ readiness score snapshots: scoped strictly to the owner's userId field.
+    match /readiness_scores/{scoreId} {
+      allow create: if request.auth != null
+        && request.resource.data.userId == request.auth.uid;
+      allow read, update, delete: if request.auth != null
+        && resource.data.userId == request.auth.uid;
+    }
+
+    // Server-only collections written exclusively by Cloud Functions (Admin SDK).
+    // Explicit deny prevents accidental client access if default-deny is ever misunderstood.
+    match /exam_quizzes/{quizId} {
+      allow read, write: if false;
+    }
+    match /quiz_open_attempt_scores/{scoreId} {
+      allow read, write: if false;
+    }
+    match /notification_ledger/{ledgerId} {
+      allow read, write: if false;
+    }
+  }
+}

@@ -1,0 +1,50 @@
+# Portfolio CI: static analysis, tests, and Cloud Functions compile.
+# Does not start Firebase emulators (use Start-Demo.ps1 / start-demo.sh locally).
+
+name: CI
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+
+jobs:
+  flutter:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: subosito/flutter-action@v2
+        with:
+          channel: stable
+          cache: true
+
+      - name: Prepare env asset for bundle
+        run: cp assets/.env.demo assets/.env
+
+      - run: flutter pub get
+      - run: flutter analyze
+      - run: flutter test
+
+  functions:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: functions/package-lock.json
+
+      - name: Install and build Cloud Functions
+        working-directory: functions
+        run: |
+          npm ci
+          npm run build
+
+      - name: npm audit (informational)
+        working-directory: functions
+        continue-on-error: true
+        run: npm audit --audit-level=high
