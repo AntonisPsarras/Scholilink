@@ -75,6 +75,7 @@ class ExamGenerationNotifier extends StateNotifier<ExamGenerationState> {
             syllabusText: syllabusText,
             scannedImages: scannedImages,
             language: language,
+            subscriptionType: user.subscriptionType,
           );
       state = state.copyWith(isLoading: false, generatedQuiz: quiz);
       return quiz;
@@ -145,6 +146,7 @@ class ExamGenerationNotifier extends StateNotifier<ExamGenerationState> {
                       .toString(),
               },
               language: language,
+              subscriptionType: user.subscriptionType,
             );
         final scored = List<Map<String, dynamic>>.from(
           openResult['questionScores'] ?? const <Map<String, dynamic>>[],

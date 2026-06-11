@@ -15,12 +15,19 @@ Future<R> runAiIsolate<Q extends Object?, R extends Object?>(
   return compute(fn, message);
 }
 
+/// Max prior user/model exchanges sent to `chatWithAi` (client-side cap).
+const int aiCallableMaxHistoryTurns = 12;
+
 /// Builds the `history` payload for the smart-notes `chatWithAi` callable (matches prior notifier structure).
 List<Map<String, dynamic>> buildSmartNotesCallableHistory(
   Map<String, dynamic> args,
 ) {
   final rawItems = args['items'] as List<dynamic>;
-  final items = rawItems.cast<Map<String, dynamic>>();
+  final allItems = rawItems.cast<Map<String, dynamic>>();
+  final maxTurns = args['maxTurns'] as int? ?? aiCallableMaxHistoryTurns;
+  final items = allItems.length > maxTurns
+      ? allItems.sublist(allItems.length - maxTurns)
+      : allItems;
   final history = <Map<String, dynamic>>[
     {
       'role': 'user',
@@ -41,7 +48,11 @@ List<Map<String, dynamic>> buildSmartNotesCallableHistory(
 
   for (final item in items) {
     final prompt = item['prompt']! as String;
-    final cards = item['cards']! as List<dynamic>;
+    final cardTitles = (item['cardTitles'] as List<dynamic>? ?? const [])
+        .whereType<String>()
+        .map((t) => t.trim())
+        .where((t) => t.isNotEmpty)
+        .toList();
     history.add({
       'role': 'user',
       'parts': [
@@ -51,7 +62,11 @@ List<Map<String, dynamic>> buildSmartNotesCallableHistory(
     history.add({
       'role': 'model',
       'parts': [
-        {'text': jsonEncode(cards)},
+        {
+          'text': cardTitles.isEmpty
+              ? '(σημειώσεις)'
+              : cardTitles.join(', '),
+        },
       ],
     });
   }
@@ -88,7 +103,11 @@ List<Map<String, dynamic>> buildStudyBuddyCallableHistory(
 ) {
   final systemUser = args['systemUser']! as String;
   final rawTurns = args['turns'] as List<dynamic>;
-  final turns = rawTurns.cast<Map<String, dynamic>>();
+  final allTurns = rawTurns.cast<Map<String, dynamic>>();
+  final maxTurns = args['maxTurns'] as int? ?? aiCallableMaxHistoryTurns;
+  final turns = allTurns.length > maxTurns
+      ? allTurns.sublist(allTurns.length - maxTurns)
+      : allTurns;
 
   final history = <Map<String, dynamic>>[
     {

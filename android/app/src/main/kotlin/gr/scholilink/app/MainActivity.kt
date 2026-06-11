@@ -1,4 +1,4 @@
-package com.example.student_dashboard
+package gr.scholilink.app
 
 import io.flutter.embedding.android.FlutterActivity
 

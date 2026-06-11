@@ -37,6 +37,21 @@ class _AiSettingsScreenState extends ConsumerState<AiSettingsScreen> {
 
   Future<void> _save() async {
     final raw = _controller.text.trim();
+    final subscriptionType =
+        ref.read(authStateProvider).valueOrNull?.subscriptionType;
+    if (raw.isNotEmpty &&
+        !isByokSubscriptionEligible(subscriptionType)) {
+      CustomSnackBar.show(
+        context: context,
+        message:
+            (ref.read(authStateProvider).value?.preferredLanguage ?? 'el') ==
+                'el'
+            ? 'Το δικό σου API key είναι διαθέσιμο μόνο σε ScholiLink Pro.'
+            : 'Bring-your-own API key is available on ScholiLink Pro only.',
+        type: SnackBarType.warning,
+      );
+      return;
+    }
     if (raw.isNotEmpty && !_looksLikeGeminiKey(raw)) {
       CustomSnackBar.show(
         context: context,
@@ -77,6 +92,12 @@ class _AiSettingsScreenState extends ConsumerState<AiSettingsScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final subscriptionType =
+        ref.watch(authStateProvider).valueOrNull?.subscriptionType;
+    final isPro = isByokSubscriptionEligible(subscriptionType);
+    final isGreek =
+        ref.watch(authStateProvider).value?.preferredLanguage == 'el';
+
     return AppTheme.globalGradient(
       child: Scaffold(
         backgroundColor: Colors.transparent,
@@ -106,7 +127,13 @@ class _AiSettingsScreenState extends ConsumerState<AiSettingsScreen> {
                     ),
                     const SizedBox(height: 8),
                     Text(
-                      'Provide your own key to use BYOK mode (your key, your quota). Leave empty to use server default limits.',
+                      isPro
+                          ? (isGreek
+                                ? 'Πρόσθεσε δικό σου Gemini key για BYOK (δικό σου quota, χωρίς Sparks).'
+                                : 'Add your Gemini key for BYOK mode (your quota, no Sparks).')
+                          : (isGreek
+                                ? 'Το BYOK είναι διαθέσιμο μόνο σε ScholiLink Pro. Άφησε κενό για τα ημερήσια Sparks.'
+                                : 'BYOK is available on ScholiLink Pro only. Leave empty to use daily Sparks.'),
                       style: TextStyle(
                         color: context.brand.neutralGrey,
                         fontSize: 13,
@@ -115,6 +142,7 @@ class _AiSettingsScreenState extends ConsumerState<AiSettingsScreen> {
                     const SizedBox(height: 12),
                     TextField(
                       controller: _controller,
+                      enabled: isPro,
                       obscureText: _obscure,
                       decoration: InputDecoration(
                         hintText: 'AIza...',

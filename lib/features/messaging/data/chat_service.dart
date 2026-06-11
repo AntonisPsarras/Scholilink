@@ -21,10 +21,9 @@ class ChatService {
   /// Sends a chat message to a classroom.
   Future<void> sendMessage(String classroomId, ChatMessage message) async {
     if (ProfanityFilter.containsProfanity(message.text)) {
-      // Apply safety penalty
       await _ref
           .read(safetyServiceProvider)
-          .applyPenalty(message.authorId, PenaltyType.profanity);
+          .applyPenaltyForText(message.authorId, message.text);
       throw const FormatException('profanity_detected');
     }
 

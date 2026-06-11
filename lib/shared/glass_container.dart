@@ -38,7 +38,7 @@ class GlassContainer extends StatefulWidget {
     this.customBorderRadius,
     this.backgroundColor,
     this.border,
-    this.animate = true,
+    this.animate = false,
     this.respectScrollPerformance = true,
     this.degradeBlurWhileScrolling = true,
   });

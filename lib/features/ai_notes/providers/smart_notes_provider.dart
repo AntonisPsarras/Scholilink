@@ -126,6 +126,8 @@ class SmartNotesNotifier extends StateNotifier<SmartNotesState> {
       state = state.copyWith(isLoading: true, error: null);
     }
 
+    final streamId = 'stream-${DateTime.now().millisecondsSinceEpoch}';
+
     try {
       String sessionId = _sessionId ?? '';
       if (sessionId.isEmpty) {
@@ -144,12 +146,13 @@ class SmartNotesNotifier extends StateNotifier<SmartNotesState> {
         for (final inter in state.interactions)
           {
             'prompt': inter.prompt,
-            'cards': inter.cards.map((c) => c.toMap()).toList(),
+            'cardTitles': inter.cards.map((c) => c.title).toList(),
           },
       ];
 
       final history = await runAiIsolate(buildSmartNotesCallableHistory, {
         'items': historyItems,
+        'maxTurns': aiCallableMaxHistoryTurns,
       });
 
       Config.debugLogAiEnvSnapshot('SmartNotes');
@@ -169,7 +172,9 @@ class SmartNotesNotifier extends StateNotifier<SmartNotesState> {
         );
       }
       final callable = chatWithAiCallable();
-      final userApiKey = await _ref.read(aiKeyStoreProvider).readGeminiApiKey();
+      final userApiKey = await _ref
+          .read(aiKeyStoreProvider)
+          .readGeminiApiKeyIfEligible(_subscriptionType);
 
       final base64Images = await runAiIsolate(
         encodeImagesToBase64,
@@ -184,6 +189,7 @@ class SmartNotesNotifier extends StateNotifier<SmartNotesState> {
         'length': lengthOption,
         'depth': depthOption,
         'images': base64Images,
+        'streamId': streamId,
         if (userApiKey != null) 'userApiKey': userApiKey,
       });
 
@@ -295,6 +301,10 @@ class SmartNotesNotifier extends StateNotifier<SmartNotesState> {
         state = state.copyWith(isLoading: false, error: errorMsg);
       }
       return null;
+    } finally {
+      try {
+        await aiStreamChunkDocRef(_userId, streamId).delete();
+      } catch (_) {}
     }
   }
 }

@@ -23,6 +23,7 @@ import '../../auth/domain/parental_consent_eligibility.dart';
 import '../../../core/spark_limit_message.dart';
 import '../../../core/spark_sync.dart';
 import '../../../shared/ai_upload_service.dart';
+import '../../../shared/ocr_image_bytes.dart';
 import '../../auth/presentation/parental_consent_screen.dart';
 import '../providers/smart_notes_provider.dart';
 import '../domain/smart_notes_models.dart';
@@ -51,6 +52,7 @@ class _SmartNotesScreenState extends ConsumerState<SmartNotesScreen> {
     final pickedFile = await picker.pickImage(
       source: ImageSource.gallery,
       imageQuality: 70,
+      maxWidth: 1600,
     );
     if (pickedFile != null) {
       setState(() => _selectedImages.add(pickedFile));
@@ -78,7 +80,6 @@ class _SmartNotesScreenState extends ConsumerState<SmartNotesScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final notesState = ref.watch(smartNotesProvider);
     final user = ref.watch(authStateProvider).value;
     final sessionId = ref.watch(activeNoteSessionIdProvider);
     final sparks = user?.aiSparks ?? 0;
@@ -370,46 +371,11 @@ class _SmartNotesScreenState extends ConsumerState<SmartNotesScreen> {
                           ],
                         ),
                       ),
-                      // Notes content
+                      // Notes content — provider watch isolated to list subtree
                       Expanded(
-                        child: ScrollConfiguration(
-                          behavior: ScrollConfiguration.of(
-                            context,
-                          ).copyWith(scrollbars: false),
-                          child: SingleChildScrollView(
-                            padding: const EdgeInsets.fromLTRB(24, 16, 24, 8),
-                            child: Column(
-                              children: [
-                                if (notesState.interactions.isEmpty &&
-                                    !notesState.isLoading)
-                                  _buildInitialPlaceholder(loc)
-                                else
-                                  ...notesState.interactions.map(
-                                    (interaction) => _InteractionBlock(
-                                      interaction: interaction,
-                                    ),
-                                  ),
-                                if (notesState.isLoading)
-                                  Padding(
-                                    padding: const EdgeInsets.all(20.0),
-                                    child: AIPulsingIndicator(
-                                      color: context.brand.royalLavender,
-                                      size: 40,
-                                    ),
-                                  ),
-                                if (notesState.error != null)
-                                  Padding(
-                                    padding: const EdgeInsets.all(20.0),
-                                    child: Text(
-                                      notesState.error!,
-                                      style: TextStyle(
-                                        color: context.brand.dangerRose,
-                                      ),
-                                    ),
-                                  ),
-                              ],
-                            ),
-                          ),
+                        child: _SmartNotesInteractionList(
+                          loc: loc,
+                          desktopPadding: true,
                         ),
                       ),
                       // ── Modern pill input bar ─────────────────────────────
@@ -455,7 +421,6 @@ class _SmartNotesScreenState extends ConsumerState<SmartNotesScreen> {
                                 user,
                                 user?.preferredLanguage,
                                 nextSparkReset,
-                                isLoading: notesState.isLoading,
                                 isDesktop: true,
                               ),
                             ),
@@ -512,44 +477,10 @@ class _SmartNotesScreenState extends ConsumerState<SmartNotesScreen> {
       body: Column(
         children: [
           Expanded(
-            child: SingleChildScrollView(
-              padding: const EdgeInsets.all(20.0),
-              child: Screenshot(
-                controller: _screenshotController,
-                child: Container(
-                  color: context
-                      .brand
-                      .backgroundSnow, // Ensure background for screenshot
-                  child: Column(
-                    children: [
-                      if (notesState.interactions.isEmpty &&
-                          !notesState.isLoading)
-                        _buildInitialPlaceholder(loc)
-                      else
-                        ...notesState.interactions.map(
-                          (interaction) =>
-                              _InteractionBlock(interaction: interaction),
-                        ),
-                      if (notesState.isLoading)
-                        Padding(
-                          padding: const EdgeInsets.all(20.0),
-                          child: AIPulsingIndicator(
-                            color: context.brand.royalLavender,
-                            size: 40,
-                          ),
-                        ),
-                      if (notesState.error != null)
-                        Padding(
-                          padding: const EdgeInsets.all(20.0),
-                          child: Text(
-                            notesState.error!,
-                            style: TextStyle(color: context.brand.dangerRose),
-                          ),
-                        ),
-                    ],
-                  ),
-                ),
-              ),
+            child: _SmartNotesInteractionList(
+              loc: loc,
+              desktopPadding: false,
+              screenshotController: _screenshotController,
             ),
           ),
           _buildInputArea(
@@ -559,33 +490,9 @@ class _SmartNotesScreenState extends ConsumerState<SmartNotesScreen> {
             user,
             user?.preferredLanguage,
             nextSparkReset,
-            isLoading: notesState.isLoading,
           ),
         ],
       ),
-    );
-  }
-
-  Widget _buildInitialPlaceholder(S loc) {
-    return Column(
-      children: [
-        const SizedBox(height: 40),
-        Icon(
-          Icons.note_alt_outlined,
-          size: 100,
-          color: context.brand.royalLavender.withValues(alpha: 0.1),
-        ),
-        const SizedBox(height: 20),
-        Text(
-          loc.smartNotesWelcome,
-          textAlign: TextAlign.center,
-          style: TextStyle(
-            color: context.brand.neutralGrey,
-            fontSize: 16,
-            height: 1.5,
-          ),
-        ),
-      ],
     );
   }
 
@@ -596,7 +503,6 @@ class _SmartNotesScreenState extends ConsumerState<SmartNotesScreen> {
     AppUser? user,
     String? preferredLanguage,
     DateTime? nextSparkReset, {
-    required bool isLoading,
     bool isDesktop = false,
   }) {
     int estimatedCost() {
@@ -812,83 +718,94 @@ class _SmartNotesScreenState extends ConsumerState<SmartNotesScreen> {
                 ),
               ),
               const SizedBox(width: 8),
-              if (isLoading)
-                Container(
-                  height: 48,
-                  width: 48,
-                  decoration: BoxDecoration(
-                    color: context.brand.royalLavender.withValues(alpha: 0.5),
-                    shape: BoxShape.circle,
-                  ),
-                  child: const AIPulsingIndicator(
-                    color: Colors.white,
-                    size: 22,
-                  ),
-                )
-              else
-                LiquidTouch(
-                  onTap: () async {
-                    final text = _textController.text.trim();
-                    if (text.isEmpty && _selectedImages.isEmpty) return;
-                    final effectivePrompt = text.isNotEmpty
-                        ? text
-                        : loc.smartNotesPromptFromImagesOnly;
-
-                    final estimated = estimatedCost();
-                    if (sparks < estimated) {
-                      await _offerRewardedSparkRefill(
-                        user,
-                        preferredLanguage: preferredLanguage,
-                        nextSparkReset: nextSparkReset,
-                      );
-                      return;
-                    }
-
-                    final images = <Uint8List>[];
-                    for (final xf in _selectedImages) {
-                      images.add(await xf.readAsBytes());
-                    }
-                    final attachments = await uploadAiImages(
-                      files: List<XFile>.from(_selectedImages),
-                      feature: 'notes',
-                      sessionId: sessionId ?? 'pending',
+              Consumer(
+                builder: (context, ref, _) {
+                  final isLoading = ref.watch(
+                    smartNotesProvider.select((s) => s.isLoading),
+                  );
+                  if (isLoading) {
+                    return Container(
+                      height: 48,
+                      width: 48,
+                      decoration: BoxDecoration(
+                        color: context.brand.royalLavender.withValues(
+                          alpha: 0.5,
+                        ),
+                        shape: BoxShape.circle,
+                      ),
+                      child: const AIPulsingIndicator(
+                        color: Colors.white,
+                        size: 22,
+                      ),
                     );
+                  }
+                  return LiquidTouch(
+                    onTap: () async {
+                      final text = _textController.text.trim();
+                      if (text.isEmpty && _selectedImages.isEmpty) return;
+                      final effectivePrompt = text.isNotEmpty
+                          ? text
+                          : loc.smartNotesPromptFromImagesOnly;
 
-                    if (!mounted) return;
-                    _textController.clear();
-                    setState(() => _selectedImages.clear());
-                    FocusScope.of(context).unfocus();
-
-                    await ref
-                        .read(smartNotesProvider.notifier)
-                        .processPrompt(
-                          effectivePrompt,
-                          images: images,
-                          attachments: attachments,
-                          lengthOption: _lengthOption,
-                          depthOption: _depthOption,
-                          onSessionCreated: (newId) {
-                            ref
-                                    .read(activeNoteSessionIdProvider.notifier)
-                                    .state =
-                                newId;
-                          },
+                      final estimated = estimatedCost();
+                      if (sparks < estimated) {
+                        await _offerRewardedSparkRefill(
+                          user,
+                          preferredLanguage: preferredLanguage,
+                          nextSparkReset: nextSparkReset,
                         );
-                  },
-                  child: Container(
-                    height: 48,
-                    width: 48,
-                    decoration: BoxDecoration(
-                      color: context.brand.royalLavender,
-                      shape: BoxShape.circle,
+                        return;
+                      }
+
+                      final queuedImages = List<XFile>.from(_selectedImages);
+                      final images = await prepareAiImagesFromXFiles(
+                        queuedImages,
+                      );
+                      final attachments = await uploadAiImages(
+                        imageBytes: images,
+                        feature: 'notes',
+                        sessionId: sessionId ?? 'pending',
+                      );
+
+                      if (!mounted) return;
+                      _textController.clear();
+                      setState(() => _selectedImages.clear());
+                      FocusScope.of(context).unfocus();
+
+                      await ref
+                          .read(smartNotesProvider.notifier)
+                          .processPrompt(
+                            effectivePrompt,
+                            images: images,
+                            attachments: attachments,
+                            lengthOption: _lengthOption,
+                            depthOption: _depthOption,
+                            onSessionCreated: (newId) {
+                              ref
+                                      .read(
+                                        activeNoteSessionIdProvider.notifier,
+                                      )
+                                      .state =
+                                  newId;
+                            },
+                          );
+                    },
+                    child: Container(
+                      height: 48,
+                      width: 48,
+                      decoration: BoxDecoration(
+                        color: context.brand.royalLavender,
+                        shape: BoxShape.circle,
+                      ),
+                      child: const Icon(
+                        Icons.auto_awesome,
+                        color: Colors.white,
+                        size: 20,
+                      ),
                     ),
-                    child: const Icon(
-                      Icons.auto_awesome,
-                      color: Colors.white,
-                      size: 20,
-                    ),
-                  ),
-                ),
+                  );
+                },
+              ),
             ],
           ),
         ],
@@ -935,6 +852,118 @@ Future<Uint8List> _captureSmartNoteCardPng(
     constraints: const BoxConstraints(maxWidth: 900),
     delay: const Duration(milliseconds: 400),
   );
+}
+
+class _SmartNotesInteractionList extends ConsumerWidget {
+  final S loc;
+  final bool desktopPadding;
+  final ScreenshotController? screenshotController;
+
+  const _SmartNotesInteractionList({
+    required this.loc,
+    required this.desktopPadding,
+    this.screenshotController,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final notesState = ref.watch(smartNotesProvider);
+    final interactions = notesState.interactions;
+    final padding = desktopPadding
+        ? const EdgeInsets.fromLTRB(24, 16, 24, 8)
+        : const EdgeInsets.all(20);
+
+    if (interactions.isEmpty && !notesState.isLoading) {
+      final placeholder = _SmartNotesInitialPlaceholder(loc: loc);
+      if (screenshotController != null) {
+        return Screenshot(
+          controller: screenshotController!,
+          child: Container(
+            color: context.brand.backgroundSnow,
+            padding: padding,
+            child: placeholder,
+          ),
+        );
+      }
+      return SingleChildScrollView(padding: padding, child: placeholder);
+    }
+
+    final trailingCount =
+        (notesState.isLoading ? 1 : 0) + (notesState.error != null ? 1 : 0);
+
+    Widget listView = ListView.builder(
+      padding: padding,
+      itemCount: interactions.length + trailingCount,
+      itemBuilder: (context, index) {
+        if (index < interactions.length) {
+          return _InteractionBlock(interaction: interactions[index]);
+        }
+        final trailingIndex = index - interactions.length;
+        if (notesState.isLoading && trailingIndex == 0) {
+          return Padding(
+            padding: const EdgeInsets.all(20),
+            child: AIPulsingIndicator(
+              color: context.brand.royalLavender,
+              size: 40,
+            ),
+          );
+        }
+        return Padding(
+          padding: const EdgeInsets.all(20),
+          child: Text(
+            notesState.error!,
+            style: TextStyle(color: context.brand.dangerRose),
+          ),
+        );
+      },
+    );
+
+    if (desktopPadding) {
+      listView = ScrollConfiguration(
+        behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false),
+        child: listView,
+      );
+    }
+
+    if (screenshotController != null) {
+      listView = Screenshot(
+        controller: screenshotController!,
+        child: Container(color: context.brand.backgroundSnow, child: listView),
+      );
+    }
+
+    return listView;
+  }
+}
+
+class _SmartNotesInitialPlaceholder extends StatelessWidget {
+  final S loc;
+
+  const _SmartNotesInitialPlaceholder({required this.loc});
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      children: [
+        const SizedBox(height: 40),
+        Icon(
+          Icons.note_alt_outlined,
+          size: 100,
+          color: context.brand.royalLavender.withValues(alpha: 0.1),
+        ),
+        const SizedBox(height: 20),
+        Text(
+          loc.smartNotesWelcome,
+          textAlign: TextAlign.center,
+          style: TextStyle(
+            color: context.brand.neutralGrey,
+            fontSize: 16,
+            height: 1.5,
+          ),
+        ),
+      ],
+    );
+  }
 }
 
 class _InteractionBlock extends StatelessWidget {

@@ -677,8 +677,8 @@ class _KeepAliveTabWrapperState extends State<_KeepAliveTabWrapper>
   }
 }
 
-/// Isolates [totalUnreadCountProvider] so DM snapshot updates do not rebuild the
-/// entire [HomeScaffold] (PageView, jelly scroll, FAB).
+/// Isolates [directChatsInboxProvider] / [totalUnreadCountProvider] so DM snapshot
+/// updates do not rebuild the entire [HomeScaffold] (PageView, jelly scroll, FAB).
 class _UnreadAwareFloatingIslandNav extends ConsumerWidget {
   final int selectedIndex;
 
@@ -689,9 +689,8 @@ class _UnreadAwareFloatingIslandNav extends ConsumerWidget {
     final uid = ref.watch(
       authStateProvider.select((async) => async.valueOrNull?.uid),
     );
-    final totalUnread = uid != null
-        ? ref.watch(totalUnreadCountProvider(uid)).asData?.value ?? 0
-        : 0;
+    final totalUnread =
+        uid != null ? ref.watch(totalUnreadCountProvider(uid)) : 0;
 
     return FloatingIslandNav(
       selectedIndex: selectedIndex,

@@ -1275,6 +1275,8 @@ class _HomeworkCard extends ConsumerWidget {
     final card = GlassContainer(
       margin: const EdgeInsets.only(bottom: 16),
       borderRadius: 16,
+      blur: 0,
+      animate: false,
       padding: const EdgeInsets.all(16.0),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,

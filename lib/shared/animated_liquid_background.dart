@@ -2,6 +2,11 @@ import 'dart:math' as math;
 import 'package:flutter/material.dart';
 import 'performance_config.dart';
 
+/// Route observer for pausing liquid animation when a route is covered.
+/// Wire via [AppTheme.navigatorObservers] on [MaterialApp].
+final RouteObserver<ModalRoute<void>> liquidBackgroundRouteObserver =
+    RouteObserver<ModalRoute<void>>();
+
 /// InheritedWidget that marks a subtree as already having an
 /// [AnimatedLiquidBackground].  Nested instances check for this marker and
 /// skip rendering a second background to prevent out-of-sync gradient seams
@@ -30,12 +35,25 @@ class AnimatedLiquidBackground extends StatefulWidget {
 }
 
 class _AnimatedLiquidBackgroundState extends State<AnimatedLiquidBackground>
-    with SingleTickerProviderStateMixin {
+    with SingleTickerProviderStateMixin, RouteAware, WidgetsBindingObserver {
   AnimationController? _controller;
+
+  /// False when another route is pushed on top of this one.
+  bool _routeVisible = true;
+
+  /// True while any descendant scrollable is actively scrolling.
+  bool _userScrolling = false;
+  int _activeScrollCount = 0;
+
+  /// False when the app is backgrounded or inactive.
+  bool _appInForeground = true;
+
+  ModalRoute<dynamic>? _subscribedRoute;
 
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
     if (PerformanceConfig.useAnimatedBackground) {
       // 12 second loop — fast enough to feel alive, slow enough to stay calming
       _controller = AnimationController(
@@ -48,13 +66,83 @@ class _AnimatedLiquidBackgroundState extends State<AnimatedLiquidBackground>
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    _subscribeToRoute();
     _syncLiquidAnimationPlayback();
   }
 
-  /// Starts or stops [AnimationController.repeat] based on tier + [MediaQuery.disableAnimations].
+  void _subscribeToRoute() {
+    final route = ModalRoute.of(context);
+    if (route == _subscribedRoute) return;
+    if (_subscribedRoute != null) {
+      liquidBackgroundRouteObserver.unsubscribe(this);
+    }
+    _subscribedRoute = route;
+    if (route != null) {
+      liquidBackgroundRouteObserver.subscribe(this, route);
+    }
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    final inForeground =
+        state == AppLifecycleState.resumed ||
+        state == AppLifecycleState.inactive;
+    if (inForeground != _appInForeground) {
+      setState(() => _appInForeground = inForeground);
+      _syncLiquidAnimationPlayback();
+    }
+  }
+
+  // RouteAware — pause when a new route covers this one.
+  @override
+  void didPushNext() {
+    if (!_routeVisible) return;
+    setState(() => _routeVisible = false);
+    _syncLiquidAnimationPlayback();
+  }
+
+  @override
+  void didPopNext() {
+    if (_routeVisible) return;
+    setState(() => _routeVisible = true);
+    _syncLiquidAnimationPlayback();
+  }
+
+  @override
+  void didPush() {}
+
+  @override
+  void didPop() {}
+
+  bool _handleScrollNotification(ScrollNotification notification) {
+    if (notification is ScrollStartNotification) {
+      _activeScrollCount++;
+      if (_activeScrollCount == 1 && !_userScrolling) {
+        setState(() => _userScrolling = true);
+        _syncLiquidAnimationPlayback();
+      }
+    } else if (notification is ScrollEndNotification) {
+      _activeScrollCount = (_activeScrollCount - 1).clamp(0, 999);
+      if (_activeScrollCount == 0 && _userScrolling) {
+        setState(() => _userScrolling = false);
+        _syncLiquidAnimationPlayback();
+      }
+    }
+    return false;
+  }
+
+  bool _shouldRunAnimation(BuildContext context) {
+    return PerformanceConfig.shouldAnimateLiquidBackground(context) &&
+        _routeVisible &&
+        !_userScrolling &&
+        _appInForeground;
+  }
+
+  /// Starts or stops [AnimationController.repeat] based on tier, route, scroll,
+  /// and app lifecycle.
   void _syncLiquidAnimationPlayback() {
     if (_controller == null) return;
-    if (PerformanceConfig.shouldAnimateLiquidBackground(context)) {
+    if (_shouldRunAnimation(context)) {
       if (!_controller!.isAnimating) {
         _controller!.repeat();
       }
@@ -65,6 +153,10 @@ class _AnimatedLiquidBackgroundState extends State<AnimatedLiquidBackground>
 
   @override
   void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    if (_subscribedRoute != null) {
+      liquidBackgroundRouteObserver.unsubscribe(this);
+    }
     _controller?.dispose();
     super.dispose();
   }
@@ -94,35 +186,35 @@ class _AnimatedLiquidBackgroundState extends State<AnimatedLiquidBackground>
         PerformanceConfig.useAnimatedBackground &&
         !reduceMotion;
 
-    // Static gradient: low-end tier, reduced motion, or controller paused
-    if (!useAnimatedLayers) {
-      return _AnimatedLiquidBgMarker(
-        child: Stack(
-          children: [
-            const RepaintBoundary(child: _StaticGradientLayers()),
-            widget.child,
-          ],
-        ),
-      );
-    }
-
-    // Animated gradient — child is OUTSIDE the AnimatedBuilder
-    // so it never rebuilds when the gradient changes (key optimization)
-    return _AnimatedLiquidBgMarker(
-      child: Stack(
-        children: [
-          RepaintBoundary(
-            child: AnimatedBuilder(
-              animation: _controller!,
-              builder: (context, _) {
-                final t = _controller!.value * 2 * math.pi;
-                return _AnimatedGradientLayers(t: t);
-              },
+    final content = !useAnimatedLayers
+        ? _AnimatedLiquidBgMarker(
+            child: Stack(
+              children: [
+                const RepaintBoundary(child: _StaticGradientLayers()),
+                widget.child,
+              ],
             ),
-          ),
-          widget.child, // Never rebuilds due to gradient animation
-        ],
-      ),
+          )
+        : _AnimatedLiquidBgMarker(
+            child: Stack(
+              children: [
+                RepaintBoundary(
+                  child: AnimatedBuilder(
+                    animation: _controller!,
+                    builder: (context, _) {
+                      final t = _controller!.value * 2 * math.pi;
+                      return _AnimatedGradientLayers(t: t);
+                    },
+                  ),
+                ),
+                widget.child, // Never rebuilds due to gradient animation
+              ],
+            ),
+          );
+
+    return NotificationListener<ScrollNotification>(
+      onNotification: _handleScrollNotification,
+      child: content,
     );
   }
 }
@@ -189,40 +281,41 @@ class _AnimatedGradientLayers extends StatelessWidget {
 
     return Stack(
       children: [
-        // Base layer — soft pastels drifting slowly
-        Container(
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              begin: begin1,
-              end: end1,
-              colors: _LiquidGradients.basePrimary(brightness),
-              stops: const [0.0, 0.5, 1.0],
-            ),
-          ),
-        ),
-
-        // Second layer — cool mint/indigo highlights floating over
-        Container(
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              begin: begin2,
-              end: end2,
-              colors: _LiquidGradients.overlayDrift(brightness),
-              stops: const [0.0, 0.5, 1.0],
-            ),
-          ),
-        ),
-
-        // Third layer — aurora shimmer (pulses in opacity)
-        Opacity(
-          opacity: (auroraPulse * cap).clamp(0.0, cap),
+        RepaintBoundary(
           child: Container(
             decoration: BoxDecoration(
               gradient: LinearGradient(
-                begin: auroraBegin,
-                end: auroraEnd,
-                colors: _LiquidGradients.auroraAccent(brightness),
-                stops: const [0.0, 0.6, 1.0],
+                begin: begin1,
+                end: end1,
+                colors: _LiquidGradients.basePrimary(brightness),
+                stops: const [0.0, 0.5, 1.0],
+              ),
+            ),
+          ),
+        ),
+        RepaintBoundary(
+          child: Container(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: begin2,
+                end: end2,
+                colors: _LiquidGradients.overlayDrift(brightness),
+                stops: const [0.0, 0.5, 1.0],
+              ),
+            ),
+          ),
+        ),
+        RepaintBoundary(
+          child: Opacity(
+            opacity: (auroraPulse * cap).clamp(0.0, cap),
+            child: Container(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: auroraBegin,
+                  end: auroraEnd,
+                  colors: _LiquidGradients.auroraAccent(brightness),
+                  stops: const [0.0, 0.6, 1.0],
+                ),
               ),
             ),
           ),
@@ -241,39 +334,44 @@ class _StaticGradientLayers extends StatelessWidget {
     final b = Theme.of(context).brightness;
     return Stack(
       children: [
-        Container(
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment.topLeft,
-              end: Alignment.bottomRight,
-              colors: _LiquidGradients.basePrimary(b),
-              stops: const [0.0, 0.5, 1.0],
-            ),
-          ),
-        ),
-        Container(
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              begin: Alignment.topRight,
-              end: Alignment.bottomLeft,
-              colors: _LiquidGradients.overlayDrift(b),
-              stops: const [0.0, 0.5, 1.0],
-            ),
-          ),
-        ),
-        // Aurora accent — fixed midpoint opacity (matches animated layer average)
-        Opacity(
-          opacity: (0.5 * _LiquidGradients.auroraOpacityCap(b)).clamp(
-            0.0,
-            _LiquidGradients.auroraOpacityCap(b),
-          ),
+        RepaintBoundary(
           child: Container(
             decoration: BoxDecoration(
               gradient: LinearGradient(
-                begin: Alignment.topCenter,
-                end: Alignment.bottomCenter,
-                colors: _LiquidGradients.auroraAccent(b),
-                stops: const [0.0, 0.6, 1.0],
+                begin: Alignment.topLeft,
+                end: Alignment.bottomRight,
+                colors: _LiquidGradients.basePrimary(b),
+                stops: const [0.0, 0.5, 1.0],
+              ),
+            ),
+          ),
+        ),
+        RepaintBoundary(
+          child: Container(
+            decoration: BoxDecoration(
+              gradient: LinearGradient(
+                begin: Alignment.topRight,
+                end: Alignment.bottomLeft,
+                colors: _LiquidGradients.overlayDrift(b),
+                stops: const [0.0, 0.5, 1.0],
+              ),
+            ),
+          ),
+        ),
+        RepaintBoundary(
+          child: Opacity(
+            opacity: (0.5 * _LiquidGradients.auroraOpacityCap(b)).clamp(
+              0.0,
+              _LiquidGradients.auroraOpacityCap(b),
+            ),
+            child: Container(
+              decoration: BoxDecoration(
+                gradient: LinearGradient(
+                  begin: Alignment.topCenter,
+                  end: Alignment.bottomCenter,
+                  colors: _LiquidGradients.auroraAccent(b),
+                  stops: const [0.0, 0.6, 1.0],
+                ),
               ),
             ),
           ),

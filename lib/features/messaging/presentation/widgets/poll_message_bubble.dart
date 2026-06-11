@@ -36,6 +36,8 @@ class PollMessageBubble extends ConsumerWidget {
     return Align(
       alignment: isMe ? Alignment.centerRight : Alignment.centerLeft,
       child: GlassContainer(
+        blur: 0,
+        animate: false,
         backgroundColor: Theme.of(context).brightness == Brightness.dark
             ? const Color(0xFF2A2A3D)
             : Colors.white.withValues(alpha: 0.6),

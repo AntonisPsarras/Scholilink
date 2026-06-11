@@ -9,7 +9,6 @@ import '../../../shared/web_audio_player.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
-import '../../../shared/image_utils.dart';
 import '../../../shared/storage_service.dart';
 import '../../../shared/utils/firebase_error_handler.dart';
 import '../../auth/data/auth_repository.dart';
@@ -156,6 +155,7 @@ class _DirectChatScreenState extends ConsumerState<DirectChatScreen> {
       backgroundColor: Colors.transparent,
       builder: (ctx) => GlassContainer(
         borderRadius: 24,
+        animate: false,
         backgroundColor: Theme.of(ctx).brightness == Brightness.dark
             ? Theme.of(ctx).colorScheme.surface.withValues(alpha: 0.98)
             : Colors.white.withValues(alpha: 0.9),
@@ -410,10 +410,15 @@ class _DirectChatScreenState extends ConsumerState<DirectChatScreen> {
 
     return GlassContainer(
       borderRadius: 0,
-      blur: 20,
+      blur: 0,
+      animate: false,
       backgroundColor: dark
-          ? context.brand.surfaceElevated.withValues(alpha: 0.96)
-          : Colors.white.withValues(alpha: 0.3),
+          ? Colors.white.withValues(alpha: 0.08)
+          : Colors.white.withValues(alpha: 0.35),
+      border: Border.all(
+        color: Colors.white.withValues(alpha: 0.15),
+        width: 1,
+      ),
       child: SafeArea(
         child: Column(
           mainAxisSize: MainAxisSize.min,
@@ -1165,16 +1170,6 @@ class _DirectMessageBubbleState extends ConsumerState<_DirectMessageBubble> {
   StreamSubscription? _positionSub;
   StreamSubscription? _completeSub;
   Duration _totalDuration = Duration.zero;
-  final Map<String, Uint8List> _decodedImageBytesCache = {};
-
-  Uint8List _decodedBytesFor(String url) {
-    final cached = _decodedImageBytesCache[url];
-    if (cached != null) return cached;
-    final decoded = Uint8List.fromList(decodeBase64DataUri(url));
-    _decodedImageBytesCache[url] = decoded;
-    return decoded;
-  }
-
   void _setPlaybackProgress(double value) {
     final clamped = value.clamp(0.0, 1.0);
     final now = DateTime.now();
@@ -1328,6 +1323,7 @@ class _DirectMessageBubbleState extends ConsumerState<_DirectMessageBubble> {
             _showMessageOptions(context, message, isMe, widget.s),
         child: GlassContainer(
           blur: 0,
+          animate: false,
           backgroundColor: context.chatBubbleGlassFill(isMe),
           customBorderRadius: BorderRadius.only(
             topLeft: const Radius.circular(16),
@@ -1417,9 +1413,6 @@ class _DirectMessageBubbleState extends ConsumerState<_DirectMessageBubble> {
                       child: ChatInlineImage(
                         url: url,
                         heroTag: 'img_${message.id}_$url',
-                        decodedBytes: isBase64DataUri(url)
-                            ? _decodedBytesFor(url)
-                            : null,
                         errorLabel: widget.s.lang == 'el'
                             ? 'Σφάλμα φόρτωσης'
                             : 'Error loading',
@@ -1623,6 +1616,7 @@ class _DirectMessageBubbleState extends ConsumerState<_DirectMessageBubble> {
       builder: (ctx) {
         return GlassContainer(
           borderRadius: 24,
+          animate: false,
           backgroundColor: Colors.white.withValues(
             alpha: 0.9,
           ), // Higher opacity for readability

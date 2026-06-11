@@ -336,6 +336,8 @@ class _NextClassBannerState extends ConsumerState<NextClassBanner> {
           child: GlassContainer(
             padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
             borderRadius: 16,
+            blur: 0,
+            animate: false,
             backgroundColor: Theme.of(context).brightness == Brightness.dark
                 ? context.brand.primaryPurple.withValues(alpha: 0.12)
                 : Colors.white.withValues(alpha: 0.55),

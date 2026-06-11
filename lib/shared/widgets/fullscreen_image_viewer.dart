@@ -1,11 +1,12 @@
-import 'dart:typed_data';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:http/http.dart' as http;
 import 'package:flutter/material.dart';
-import '../utils/file_saver.dart';
-import '../../../shared/image_utils.dart'; // import for isBase64DataUri and decodeBase64DataUri
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
-class FullScreenImageViewer extends StatelessWidget {
+import '../image_utils.dart';
+import '../utils/file_saver.dart';
+
+class FullScreenImageViewer extends ConsumerWidget {
   final String imageUrl;
   final String heroTag;
 
@@ -34,7 +35,7 @@ class FullScreenImageViewer extends StatelessWidget {
 
       final response = await http.get(Uri.parse(imageUrl));
       if (response.statusCode == 200) {
-        final Uint8List bytes = response.bodyBytes;
+        final bytes = response.bodyBytes;
         final fileName =
             'scholilink_${DateTime.now().millisecondsSinceEpoch}.png';
 
@@ -58,7 +59,46 @@ class FullScreenImageViewer extends StatelessWidget {
   }
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
+    final dpr = MediaQuery.devicePixelRatioOf(context);
+    final sz = MediaQuery.sizeOf(context);
+    final pxW = (sz.width * dpr).round();
+    final pxH = (sz.height * dpr).round();
+
+    final Widget imageBody;
+    if (isBase64DataUri(imageUrl)) {
+      final bytesAsync = ref.watch(base64ChatImageBytesProvider(imageUrl));
+      imageBody = bytesAsync.when(
+        data: (bytes) => Image.memory(
+          bytes,
+          fit: BoxFit.contain,
+          cacheWidth: pxW,
+          cacheHeight: pxH,
+        ),
+        loading: () => const Center(
+          child: CircularProgressIndicator(color: Colors.white),
+        ),
+        error: (_, __) => const Center(
+          child: Icon(Icons.broken_image, color: Colors.white54, size: 64),
+        ),
+      );
+    } else {
+      imageBody = CachedNetworkImage(
+        imageUrl: imageUrl,
+        fit: BoxFit.contain,
+        memCacheWidth: pxW,
+        memCacheHeight: pxH,
+        maxWidthDiskCache: pxW,
+        maxHeightDiskCache: pxH,
+        placeholder: (_, __) => const Center(
+          child: CircularProgressIndicator(color: Colors.white),
+        ),
+        errorWidget: (_, __, ___) => const Center(
+          child: Icon(Icons.broken_image, color: Colors.white54, size: 64),
+        ),
+      );
+    }
+
     return Scaffold(
       backgroundColor: Colors.black,
       appBar: AppBar(
@@ -81,37 +121,7 @@ class FullScreenImageViewer extends StatelessWidget {
           maxScale: 4.0,
           child: Hero(
             tag: heroTag,
-            child: isBase64DataUri(imageUrl)
-                ? Image.memory(
-                    Uint8List.fromList(decodeBase64DataUri(imageUrl)),
-                    fit: BoxFit.contain,
-                  )
-                : Builder(
-                    builder: (context) {
-                      final dpr = MediaQuery.devicePixelRatioOf(context);
-                      final sz = MediaQuery.sizeOf(context);
-                      final pxW = (sz.width * dpr).round();
-                      final pxH = (sz.height * dpr).round();
-                      return CachedNetworkImage(
-                        imageUrl: imageUrl,
-                        fit: BoxFit.contain,
-                        memCacheWidth: pxW,
-                        memCacheHeight: pxH,
-                        maxWidthDiskCache: pxW,
-                        maxHeightDiskCache: pxH,
-                        placeholder: (_, __) => const Center(
-                          child: CircularProgressIndicator(color: Colors.white),
-                        ),
-                        errorWidget: (_, __, ___) => const Center(
-                          child: Icon(
-                            Icons.broken_image,
-                            color: Colors.white54,
-                            size: 64,
-                          ),
-                        ),
-                      );
-                    },
-                  ),
+            child: imageBody,
           ),
         ),
       ),

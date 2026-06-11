@@ -8,14 +8,16 @@ import 'package:flutter/foundation.dart';
 import '../../../core/firebase_functions_helpers.dart';
 import '../../../core/social_callables.dart';
 
-enum PenaltyType { profanity, cyberbullying, reported }
-
 class SafetyService {
-  /// Applies a penalty via Cloud Function (Firestore rules block client writes to moderation fields).
-  Future<void> applyPenalty(String userId, PenaltyType type) async {
+  /// Re-moderates [text] server-side and applies a penalty to [userId] when warranted.
+  /// Penalty severity is derived on the server (never supplied by the client).
+  Future<void> applyPenaltyForText(String userId, String text) async {
     if (userId != FirebaseAuth.instance.currentUser?.uid) {
       return;
     }
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) return;
+
     await refreshAuthTokenForCallable();
     final callable =
         FirebaseFunctions.instanceFor(
@@ -25,7 +27,7 @@ class SafetyService {
           'applySafetyPenalty',
           options: HttpsCallableOptions(timeout: const Duration(seconds: 60)),
         );
-    await callable.call({'penaltyType': type.name});
+    await callable.call({'text': trimmed});
   }
 
   /// Checks if a user is currently banned.
@@ -45,7 +47,7 @@ class SafetyService {
     return '${hours.toString().padLeft(2, '0')}:${minutes.toString().padLeft(2, '0')}';
   }
 
-  /// Server-side Gemini moderation (Cloud Function applies cyberbullying penalty when needed).
+  /// Server-side Gemini moderation (Cloud Function applies penalties when needed).
   Future<void> checkBullyingAndPenalize(String userId, String text) async {
     if (text.trim().isEmpty) return;
 

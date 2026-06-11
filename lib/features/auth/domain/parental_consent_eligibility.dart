@@ -1,6 +1,11 @@
 import 'user_model.dart';
 
-int _ageInYears(DateTime birthDate) {
+/// Minimum age for AI without parental email verification.
+/// Must match Cloud Functions `PARENTAL_CONSENT_MIN_AGE_YEARS` and
+/// `user_private/{uid}.parentalConsentEligibility`.
+const int kParentalConsentMinAgeYears = 15;
+
+int ageInYearsFromBirthDate(DateTime birthDate) {
   final now = DateTime.now();
   var age = now.year - birthDate.year;
   if (now.month < birthDate.month ||
@@ -11,14 +16,15 @@ int _ageInYears(DateTime birthDate) {
 }
 
 /// Under-15 students need verified parental consent before AI features.
-/// Users 15+ are not gated here (onboarding sets consent for them).
+/// Users [kParentalConsentMinAgeYears]+ are not gated here (onboarding sets consent for them).
+/// Under-15 users cannot self-assert consent — only server onboarding / parent verification can.
 bool requiresParentalAiGate(AppUser user) {
   if (user.schoolRole != 'student') return false;
   final bd = user.birthDate;
   if (bd == null) {
     return !user.hasParentalConsent;
   }
-  if (_ageInYears(bd) >= 15) {
+  if (ageInYearsFromBirthDate(bd) >= kParentalConsentMinAgeYears) {
     return false;
   }
   return !user.hasParentalConsent;

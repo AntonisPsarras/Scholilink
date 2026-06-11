@@ -86,6 +86,8 @@ class SectionLoadingShimmer extends StatelessWidget {
       height: height,
       width: double.infinity,
       borderRadius: borderRadius,
+      blur: 0,
+      animate: false,
       backgroundColor: Colors.white.withValues(alpha: 0.2),
       child: Center(
         child: SizedBox(

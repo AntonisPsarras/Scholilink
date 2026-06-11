@@ -1,8 +1,9 @@
 import {createHash, randomBytes, randomInt, timingSafeEqual} from 'crypto';
+import {containsProfanity} from './profanity';
 import {defineSecret} from 'firebase-functions/params';
 import {setGlobalOptions} from 'firebase-functions/v2';
 import {onCall, HttpsError} from 'firebase-functions/v2/https';
-import {onDocumentCreated} from 'firebase-functions/v2/firestore';
+import {onDocumentCreated, onDocumentWritten} from 'firebase-functions/v2/firestore';
 import {onSchedule} from 'firebase-functions/v2/scheduler';
 import {logger} from 'firebase-functions';
 import * as admin from 'firebase-admin';
@@ -33,22 +34,31 @@ const proActivationEmailJsPrivateKey = defineSecret('PRO_ACTIVATION_EMAILJS_PRIV
 /** Server-only pepper for hashing one-time activation codes stored under `user_private/{uid}` */
 const proActivationCodePepper = defineSecret('PRO_ACTIVATION_CODE_PEPPER');
 
+/** Gemini API key — bound on AI callables/triggers via `secrets: [googleAiApiKey]`. */
+const googleAiApiKey = defineSecret('GOOGLE_AI_API_KEY');
+/** Optional Tavily key for exam-quiz web context (`generateExamQuiz` only). */
+const tavilyApiKey = defineSecret('TAVILY_API_KEY');
+
 /**
  * Gemini API key for @google/generative-ai (Google AI Studio).
- *
- * Set runtime env var `GOOGLE_AI_API_KEY` for the function service.
- *
- * Create a key: https://aistudio.google.com/apikey — enable "Generative Language API" on the GCP project.
+ * Production: `firebase functions:secrets:set GOOGLE_AI_API_KEY`
+ * Emulator / LOCAL_DEMO_MODE: falls back to `functions/.env` or deterministic demo key.
  */
 function resolveGoogleAiApiKey(): string {
+  const fromSecret = googleAiApiKey.value().trim();
+  if (fromSecret) return fromSecret;
   const fromEnv = process.env.GOOGLE_AI_API_KEY?.trim();
   if (fromEnv) return fromEnv;
+  if (LOCAL_DEMO_MODE) return 'demo-gemini-api-key';
   return '';
 }
 
 function resolveTavilyApiKey(): string {
+  const fromSecret = tavilyApiKey.value().trim();
+  if (fromSecret) return fromSecret;
   const fromEnv = process.env.TAVILY_API_KEY?.trim();
   if (fromEnv) return fromEnv;
+  if (LOCAL_DEMO_MODE) return 'demo-tavily-key';
   return '';
 }
 
@@ -597,11 +607,16 @@ async function getOrRefreshUserSparks(uid: string, transaction: admin.firestore.
 }
 
 async function consumeSparksOrThrow(uid: string, sparkCost: number): Promise<{remainingSparks: number}> {
+  const tz = SPARK_RESET_TIMEZONE;
+  const nextResetIso = getNextSparkResetUtc(new Date(), tz).toISOString();
   return db.runTransaction(async (transaction) => {
     const user = await getOrRefreshUserSparks(uid, transaction);
     const currentSparks = user.aiSparks ?? 0;
     if (currentSparks < sparkCost) {
-      throw new HttpsError('resource-exhausted', 'Daily spark limit reached.');
+      throw new HttpsError('resource-exhausted', 'Daily spark limit reached.', {
+        nextRefreshAt: nextResetIso,
+        sparkTimezone: tz,
+      });
     }
     const remaining = currentSparks - sparkCost;
     transaction.update(db.collection('users').doc(uid), {
@@ -612,6 +627,84 @@ async function consumeSparksOrThrow(uid: string, sparkCost: number): Promise<{re
 }
 
 type PenaltyTypeName = 'profanity' | 'cyberbullying' | 'reported';
+
+type MessageModerationEvaluation = {
+  flagged: boolean;
+  penaltyType: PenaltyTypeName | null;
+  moderationConfigured: boolean;
+  localDemoMode?: boolean;
+};
+
+async function evaluateCyberbullyingFlag(text: string): Promise<boolean> {
+  const apiKey = resolveGoogleAiApiKey();
+  if (!apiKey) {
+    logger.error('evaluateCyberbullyingFlag: GOOGLE_AI_API_KEY missing — blocking unchecked content.');
+    throw new HttpsError(
+      'failed-precondition',
+      'Moderation is not configured. Message cannot be delivered.',
+    );
+  }
+
+  const genAI = new GoogleGenerativeAI(apiKey);
+  const model = genAI.getGenerativeModel({
+    model: GEMINI_MODEL,
+    generationConfig: {responseMimeType: 'application/json'},
+  });
+
+  const moderationPrompt = [
+    'You are a moderation assistant for a Greek high-school student messaging app.',
+    'Analyze the message for cyberbullying, extreme aggression, or hateful behavior.',
+    'Return ONLY valid JSON: {"isBullying": boolean, "confidence": number, "reason": string}',
+    'Only mark isBullying true if confidence > 0.8.',
+    `Message: ${JSON.stringify(text)}`,
+  ].join('\n');
+
+  try {
+    const result = await model.generateContent(moderationPrompt);
+    const responseText = extractTextFromGenerateResult(result);
+    const parsed = parseJsonObject<Record<string, unknown>>(responseText, {});
+    return parsed.isBullying === true && Number(parsed.confidence ?? 0) > 0.8;
+  } catch (e) {
+    logger.error('evaluateCyberbullyingFlag model error', e);
+    throw new HttpsError(
+      'unavailable',
+      'Moderation service temporarily unavailable.',
+    );
+  }
+}
+
+/** Fresh server-side moderation — penalty severity is never taken from the client. */
+async function evaluateMessagePenalty(text: string): Promise<MessageModerationEvaluation> {
+  const trimmed = text.trim();
+  if (!trimmed) {
+    return {flagged: false, penaltyType: null, moderationConfigured: true};
+  }
+  if (trimmed.length > 4000) {
+    return {flagged: true, penaltyType: 'cyberbullying', moderationConfigured: true};
+  }
+
+  if (containsProfanity(trimmed)) {
+    return {flagged: true, penaltyType: 'profanity', moderationConfigured: true};
+  }
+
+  if (LOCAL_DEMO_MODE) {
+    const lowered = trimmed.toLowerCase();
+    const flagged = lowered.includes('hate') || lowered.includes('bully');
+    return {
+      flagged,
+      penaltyType: flagged ? 'cyberbullying' : null,
+      moderationConfigured: false,
+      localDemoMode: true,
+    };
+  }
+
+  const flagged = await evaluateCyberbullyingFlag(trimmed);
+  return {
+    flagged,
+    penaltyType: flagged ? 'cyberbullying' : null,
+    moderationConfigured: true,
+  };
+}
 
 async function applySafetyPenaltyForUid(uid: string, penaltyType: PenaltyTypeName): Promise<void> {
   const userRef = db.collection('users').doc(uid);
@@ -660,9 +753,271 @@ async function applySafetyPenaltyForUid(uid: string, penaltyType: PenaltyTypeNam
 }
 
 const CHAT_MAX_PROMPT_CHARS = 32000;
-const CHAT_MAX_HISTORY_ITEMS = 40;
+/** Client caps history to ~12 turns; allow system preamble + pairs. */
+const CHAT_MAX_HISTORY_ITEMS = 26;
+const CHAT_MAX_HISTORY_PART_TEXT_CHARS = CHAT_MAX_PROMPT_CHARS;
 const CHAT_MAX_IMAGES = 4;
 const CHAT_MAX_IMAGE_B64_CHARS = 6_000_000;
+const EXAM_MAX_SUBJECT_NAME_CHARS = 120;
+const EXAM_MAX_DIFFICULTY_CHARS = 40;
+const EXAM_MAX_SYLLABUS_TEXT_CHARS = CHAT_MAX_PROMPT_CHARS;
+const EXAM_MAX_OPEN_QUESTIONS = 30;
+const EXAM_MAX_OPEN_QUESTION_TEXT_CHARS = CHAT_MAX_PROMPT_CHARS;
+const EXAM_MAX_ANSWER_TEXT_CHARS = CHAT_MAX_PROMPT_CHARS;
+const AI_STREAM_WRITE_INTERVAL_MS = 200;
+
+function capClientText(raw: unknown, maxChars: number): string {
+  if (typeof raw !== 'string') return '';
+  const trimmed = raw.trim();
+  if (!trimmed) return '';
+  return trimmed.length > maxChars ? trimmed.slice(0, maxChars) : trimmed;
+}
+
+function requireClientTextField(
+  raw: unknown,
+  fieldName: string,
+  maxChars: number,
+): string {
+  if (typeof raw !== 'string') {
+    throw new HttpsError('invalid-argument', `${fieldName} must be a string.`);
+  }
+  const capped = capClientText(raw, maxChars);
+  if (!capped) {
+    throw new HttpsError('invalid-argument', `${fieldName} is required.`);
+  }
+  return capped;
+}
+
+function assertOptionalClientTextField(
+  raw: unknown,
+  fieldName: string,
+  maxChars: number,
+): string {
+  if (raw === undefined || raw === null || raw === '') return '';
+  if (typeof raw !== 'string') {
+    throw new HttpsError('invalid-argument', `${fieldName} must be a string.`);
+  }
+  return capClientText(raw, maxChars);
+}
+
+type SanitizedOpenQuestion = {
+  index: number;
+  questionText: string;
+  topicTag: string;
+  expected: string;
+  studentAnswer: string;
+};
+
+/** Whitelist Gemini chat roles/parts from client history (role+parts or legacy isUser+text). */
+function sanitizeChatHistoryForGemini(raw: unknown): Array<Record<string, unknown>> {
+  if (!Array.isArray(raw)) return [];
+
+  const sanitized: Array<Record<string, unknown>> = [];
+  for (const item of raw.slice(-CHAT_MAX_HISTORY_ITEMS)) {
+    if (!item || typeof item !== 'object') continue;
+    const rec = item as Record<string, unknown>;
+
+    let role: 'user' | 'model' | null = null;
+    let partsRaw: unknown;
+    if (rec.role === 'user' || rec.role === 'model') {
+      role = rec.role;
+      partsRaw = rec.parts;
+    } else if (typeof rec.isUser === 'boolean') {
+      if (typeof rec.text !== 'string') continue;
+      role = rec.isUser ? 'user' : 'model';
+      partsRaw = [{text: rec.text}];
+    } else {
+      continue;
+    }
+
+    if (!Array.isArray(partsRaw)) continue;
+
+    const parts: Array<Record<string, unknown>> = [];
+    let imageParts = 0;
+    for (const part of partsRaw) {
+      if (!part || typeof part !== 'object') continue;
+      const p = part as Record<string, unknown>;
+      if (typeof p.text === 'string') {
+        const text = capClientText(p.text, CHAT_MAX_HISTORY_PART_TEXT_CHARS);
+        if (text) parts.push({text});
+        continue;
+      }
+      if (imageParts >= CHAT_MAX_IMAGES) continue;
+      const inline = p.inlineData;
+      if (!inline || typeof inline !== 'object') continue;
+      const data = typeof (inline as Record<string, unknown>).data === 'string' ?
+        (inline as Record<string, unknown>).data as string :
+        '';
+      if (!data) continue;
+      const mimeTypeRaw = (inline as Record<string, unknown>).mimeType;
+      const mimeType = typeof mimeTypeRaw === 'string' && mimeTypeRaw.trim() ?
+        mimeTypeRaw.trim() :
+        'image/jpeg';
+      const cappedData = data.length > CHAT_MAX_IMAGE_B64_CHARS ?
+        data.slice(0, CHAT_MAX_IMAGE_B64_CHARS) :
+        data;
+      parts.push({inlineData: {mimeType, data: cappedData}});
+      imageParts += 1;
+    }
+
+    if (parts.length === 0) continue;
+    sanitized.push({role, parts});
+  }
+  return sanitized;
+}
+
+function sanitizeOpenQuestions(raw: unknown): SanitizedOpenQuestion[] {
+  if (!Array.isArray(raw)) {
+    throw new HttpsError('invalid-argument', 'openQuestions must be an array.');
+  }
+  if (raw.length === 0) {
+    throw new HttpsError('invalid-argument', 'openQuestions is required.');
+  }
+  if (raw.length > EXAM_MAX_OPEN_QUESTIONS) {
+    throw new HttpsError(
+      'invalid-argument',
+      `openQuestions must have at most ${EXAM_MAX_OPEN_QUESTIONS} items.`,
+    );
+  }
+
+  const result: SanitizedOpenQuestion[] = [];
+  for (const item of raw) {
+    if (!item || typeof item !== 'object') continue;
+    const q = item as Record<string, unknown>;
+    const index = Number(q.index);
+    if (!Number.isInteger(index) || index < 0) continue;
+    const questionText = capClientText(q.questionText, EXAM_MAX_OPEN_QUESTION_TEXT_CHARS);
+    if (!questionText) continue;
+    result.push({
+      index,
+      questionText,
+      topicTag: capClientText(q.topicTag, EXAM_MAX_SUBJECT_NAME_CHARS),
+      expected: capClientText(q.expected, EXAM_MAX_OPEN_QUESTION_TEXT_CHARS),
+      studentAnswer: capClientText(q.studentAnswer, EXAM_MAX_ANSWER_TEXT_CHARS),
+    });
+  }
+  if (result.length === 0) {
+    throw new HttpsError('invalid-argument', 'openQuestions must contain valid question objects.');
+  }
+  return result;
+}
+
+function sanitizeQuizAnswersByIndex(
+  raw: unknown,
+  openQuestions: SanitizedOpenQuestion[],
+): Record<string, string> {
+  const allowed = new Set(openQuestions.map((q) => String(q.index)));
+  if (raw === undefined || raw === null) {
+    return Object.fromEntries(
+      openQuestions
+        .filter((q) => q.studentAnswer)
+        .map((q) => [String(q.index), q.studentAnswer]),
+    );
+  }
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    throw new HttpsError('invalid-argument', 'answers must be an object.');
+  }
+
+  const out: Record<string, string> = {};
+  for (const [key, val] of Object.entries(raw as Record<string, unknown>)) {
+    if (!allowed.has(key)) continue;
+    if (typeof val !== 'string' && typeof val !== 'number' && typeof val !== 'boolean') {
+      continue;
+    }
+    const text = capClientText(String(val), EXAM_MAX_ANSWER_TEXT_CHARS);
+    if (text) out[key] = text;
+  }
+
+  for (const q of openQuestions) {
+    const key = String(q.index);
+    if (!out[key] && q.studentAnswer) {
+      out[key] = q.studentAnswer;
+    }
+  }
+  return out;
+}
+
+function sanitizeStreamId(raw: unknown): string {
+  if (typeof raw !== 'string') return '';
+  const trimmed = raw.trim().slice(0, 128);
+  return /^[\w-]+$/.test(trimmed) ? trimmed : '';
+}
+
+async function writeAiStreamChunk(
+  ref: admin.firestore.DocumentReference,
+  text: string,
+  done: boolean,
+): Promise<void> {
+  await ref.set(
+    {
+      text,
+      done,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    },
+    {merge: true},
+  );
+}
+
+type GenerativeModelInstance = ReturnType<GoogleGenerativeAI['getGenerativeModel']>;
+
+async function generateTextWithStream(
+  model: GenerativeModelInstance,
+  contents: Array<Record<string, unknown>>,
+  streamRef: admin.firestore.DocumentReference | null,
+): Promise<string> {
+  const streamResult = await model.generateContentStream({contents: contents as never});
+  let accumulated = '';
+  let lastWriteMs = 0;
+
+  for await (const chunk of streamResult.stream) {
+    let chunkText = '';
+    try {
+      chunkText = chunk.text();
+    } catch {
+      continue;
+    }
+    if (!chunkText) continue;
+    accumulated += chunkText;
+    if (!streamRef) continue;
+    const now = Date.now();
+    if (now - lastWriteMs >= AI_STREAM_WRITE_INTERVAL_MS) {
+      await writeAiStreamChunk(streamRef, accumulated, false);
+      lastWriteMs = now;
+    }
+  }
+
+  const response = await streamResult.response;
+  if (!accumulated.trim()) {
+    try {
+      const t = response.text();
+      if (t && t.trim()) accumulated = t;
+    } catch {
+      // handled below
+    }
+  }
+  if (!accumulated.trim()) {
+    const feedback = response.promptFeedback;
+    if (feedback?.blockReason) {
+      if (streamRef) await writeAiStreamChunk(streamRef, '', true);
+      throw new HttpsError(
+        'failed-precondition',
+        `Model response blocked (${String(feedback.blockReason)}).`,
+      );
+    }
+    const first = response.candidates?.[0];
+    const finish = first?.finishReason;
+    if (streamRef) await writeAiStreamChunk(streamRef, '', true);
+    throw new HttpsError(
+      'failed-precondition',
+      `No text in model response (finish: ${String(finish ?? 'none')}). Check model ${GEMINI_MODEL} and Cloud Run logs.`,
+    );
+  }
+
+  if (streamRef) {
+    await writeAiStreamChunk(streamRef, accumulated, true);
+  }
+  return accumulated;
+}
 
 async function recursiveDeleteDocument(ref: admin.firestore.DocumentReference): Promise<void> {
   const cols = await ref.listCollections();
@@ -705,6 +1060,11 @@ async function assertClassroomAdmin(classroomId: string, uid: string): Promise<R
   return data as Record<string, unknown>;
 }
 
+/** Matches Flutter [kParentalConsentMinAgeYears] in parental_consent_eligibility.dart. */
+const PARENTAL_CONSENT_MIN_AGE_YEARS = 15;
+const MIN_STUDENT_BIRTH_AGE_YEARS = 5;
+const MAX_STUDENT_BIRTH_AGE_YEARS = 30;
+
 function computeAgeFromBirthDate(birthDate: Date): number {
   const now = new Date();
   let age = now.getFullYear() - birthDate.getFullYear();
@@ -715,8 +1075,116 @@ function computeAgeFromBirthDate(birthDate: Date): number {
   return age;
 }
 
+function deriveParentalConsentFromAge(ageYears: number): {
+  requiresParentalConsent: boolean;
+  hasParentalConsent: boolean;
+} {
+  if (ageYears >= PARENTAL_CONSENT_MIN_AGE_YEARS) {
+    return {requiresParentalConsent: false, hasParentalConsent: true};
+  }
+  return {requiresParentalConsent: true, hasParentalConsent: false};
+}
+
+function sanitizeBirthDateMillis(raw: unknown): Date {
+  const birthMs = typeof raw === 'number' ? raw :
+    typeof raw === 'string' ? Number(raw.trim()) : NaN;
+  if (!Number.isFinite(birthMs)) {
+    throw new HttpsError('invalid-argument', 'birthDateMillis is required.');
+  }
+  const birthDate = new Date(birthMs);
+  if (Number.isNaN(birthDate.getTime())) {
+    throw new HttpsError('invalid-argument', 'Invalid birthDateMillis.');
+  }
+  if (birthMs > Date.now()) {
+    throw new HttpsError('invalid-argument', 'birthDateMillis cannot be in the future.');
+  }
+  const age = computeAgeFromBirthDate(birthDate);
+  if (age < MIN_STUDENT_BIRTH_AGE_YEARS || age > MAX_STUDENT_BIRTH_AGE_YEARS) {
+    throw new HttpsError('invalid-argument', 'birthDateMillis is out of allowed range.');
+  }
+  return birthDate;
+}
+
+type ParentalConsentEligibilitySource = 'onboarding' | 'parent_verified' | 'reset';
+
+type ParentalConsentEligibilityPrivate = {
+  birthDateMillis: number;
+  ageYears: number;
+  requiresParentalConsent: boolean;
+  hasParentalConsent: boolean;
+  source: ParentalConsentEligibilitySource;
+};
+
+async function getParentalConsentEligibilityPrivate(
+  uid: string,
+): Promise<ParentalConsentEligibilityPrivate | null> {
+  const snap = await db.collection('user_private').doc(uid).get();
+  const raw = snap.data()?.parentalConsentEligibility;
+  if (!raw || typeof raw !== 'object') return null;
+  const rec = raw as Record<string, unknown>;
+  if (typeof rec.hasParentalConsent !== 'boolean') return null;
+  if (typeof rec.requiresParentalConsent !== 'boolean') return null;
+  const sourceRaw = rec.source;
+  const source: ParentalConsentEligibilitySource =
+    sourceRaw === 'parent_verified' ? 'parent_verified' :
+      sourceRaw === 'reset' ? 'reset' :
+        'onboarding';
+  return {
+    birthDateMillis: Number(rec.birthDateMillis ?? 0),
+    ageYears: Number(rec.ageYears ?? 0),
+    requiresParentalConsent: rec.requiresParentalConsent,
+    hasParentalConsent: rec.hasParentalConsent,
+    source,
+  };
+}
+
+/** Canonical consent gate in `user_private` — clients cannot read or write this doc. */
+async function writeParentalConsentEligibilityPrivate(
+  uid: string,
+  input: {
+    birthDate: Date;
+    ageYears: number;
+    hasParentalConsent: boolean;
+    source: ParentalConsentEligibilitySource;
+  },
+): Promise<ParentalConsentEligibilityPrivate> {
+  const requiresParentalConsent = input.ageYears < PARENTAL_CONSENT_MIN_AGE_YEARS;
+  let hasParentalConsent = input.hasParentalConsent;
+  if (requiresParentalConsent && input.source !== 'parent_verified') {
+    hasParentalConsent = false;
+  }
+
+  const record: ParentalConsentEligibilityPrivate = {
+    birthDateMillis: input.birthDate.getTime(),
+    ageYears: input.ageYears,
+    requiresParentalConsent,
+    hasParentalConsent,
+    source: input.source,
+  };
+
+  await db.collection('user_private').doc(uid).set({
+    parentalConsentEligibility: {
+      ...record,
+      updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+    },
+  }, {merge: true});
+
+  return record;
+}
+
 /** Blocks AI callables for under-15 users without verified parental consent. */
 async function assertAiAllowed(uid: string): Promise<void> {
+  const priv = await getParentalConsentEligibilityPrivate(uid);
+  if (priv) {
+    if (priv.requiresParentalConsent && !priv.hasParentalConsent) {
+      throw new HttpsError(
+        'permission-denied',
+        'Parental consent is required for AI features.',
+      );
+    }
+    return;
+  }
+
   const snap = await db.collection('users').doc(uid).get();
   if (!snap.exists) {
     throw new HttpsError('failed-precondition', 'User profile not found.');
@@ -725,7 +1193,7 @@ async function assertAiAllowed(uid: string): Promise<void> {
   const birthTs = data.birthDate as admin.firestore.Timestamp | undefined;
   if (birthTs) {
     const age = computeAgeFromBirthDate(birthTs.toDate());
-    if (age < 15 && data.hasParentalConsent !== true) {
+    if (age < PARENTAL_CONSENT_MIN_AGE_YEARS && data.hasParentalConsent !== true) {
       throw new HttpsError(
         'permission-denied',
         'Parental consent is required for AI features.',
@@ -741,6 +1209,40 @@ async function assertAiAllowed(uid: string): Promise<void> {
   }
 }
 
+/**
+ * BYOK skips spark deduction but is restricted to Pro subscribers so free accounts
+ * cannot bypass the server spark quota with a client-supplied key.
+ */
+async function assertByokProOnly(uid: string, userApiKey: string): Promise<void> {
+  if (!userApiKey) return;
+  const snap = await db.collection('users').doc(uid).get();
+  if (!snap.exists) {
+    throw new HttpsError('failed-precondition', 'User profile not found.');
+  }
+  if (normalizedSubscriptionPlan(snap.data()?.subscriptionType) !== 'pro') {
+    throw new HttpsError(
+      'permission-denied',
+      'Bring-your-own API key requires ScholiLink Pro.',
+    );
+  }
+}
+
+/** Ensures `exam_quizzes/{quizId}` exists and was created by [uid]. */
+async function assertExamQuizOwnedByUid(
+  quizId: string,
+  uid: string,
+): Promise<Record<string, unknown>> {
+  const quizSnap = await db.collection('exam_quizzes').doc(quizId).get();
+  if (!quizSnap.exists) {
+    throw new HttpsError('not-found', 'Quiz not found.');
+  }
+  const quizData = quizSnap.data() ?? {};
+  if (firstNonEmptyString(quizData.createdBy) !== uid) {
+    throw new HttpsError('permission-denied', 'Quiz not found or access denied.');
+  }
+  return quizData;
+}
+
 function sanitizeCurrentClass(raw: unknown): string {
   const value = typeof raw === 'string' ? raw.trim() : '';
   if (!value || value.length > 120) {
@@ -749,68 +1251,119 @@ function sanitizeCurrentClass(raw: unknown): string {
   return value;
 }
 
+const DEFAULT_CURRENT_CLASS = 'A-Lykeio-General';
+
+/** Max classrooms stored in Auth custom claims (Firestore rules read `classroomIds`). */
+const MAX_CLASSROOM_IDS_IN_CLAIMS = 40;
+
+function classroomIdsFromUserData(data: Record<string, unknown>): string[] {
+  const raw = data.classroomIds;
+  if (!Array.isArray(raw)) return [];
+  return raw
+    .filter((v): v is string => typeof v === 'string')
+    .map((id) => id.trim())
+    .filter((id) => id.length > 0 && id.length <= 128)
+    .slice(0, MAX_CLASSROOM_IDS_IN_CLAIMS);
+}
+
+function currentClassFromUserData(data: Record<string, unknown>): string {
+  const raw = data.currentClass;
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim();
+    if (trimmed.length > 0 && trimmed.length <= 120) return trimmed;
+  }
+  return DEFAULT_CURRENT_CLASS;
+}
+
+function authClaimsClassroomFieldsEqual(
+  existing: Record<string, unknown>,
+  currentClass: string,
+  classroomIds: string[],
+): boolean {
+  const prevClass = typeof existing.currentClass === 'string' ?
+    existing.currentClass :
+    '';
+  const prevIds = Array.isArray(existing.classroomIds) ?
+    existing.classroomIds.filter((v): v is string => typeof v === 'string') :
+    [];
+  return prevClass === currentClass &&
+    JSON.stringify(prevIds) === JSON.stringify(classroomIds);
+}
+
+/**
+ * Mirrors `users/{uid}` classroom membership + grade band into Auth custom claims
+ * (`currentClass`, `classroomIds`) for Firestore rules — avoids per-request `get()`.
+ */
+async function syncUserAuthClaims(uid: string): Promise<void> {
+  const userSnap = await db.collection('users').doc(uid).get();
+  if (!userSnap.exists) {
+    const existing = (await admin.auth().getUser(uid)).customClaims ?? {};
+    const next = {...existing};
+    delete next.currentClass;
+    delete next.classroomIds;
+    await admin.auth().setCustomUserClaims(uid, next);
+    return;
+  }
+
+  const data = userSnap.data() ?? {};
+  const currentClass = currentClassFromUserData(data);
+  const classroomIds = classroomIdsFromUserData(data);
+
+  let existingClaims: Record<string, unknown> = {};
+  try {
+    existingClaims = (await admin.auth().getUser(uid)).customClaims ?? {};
+  } catch (e) {
+    logger.warn('syncUserAuthClaims: auth user missing', {uid, e});
+    return;
+  }
+
+  if (authClaimsClassroomFieldsEqual(existingClaims, currentClass, classroomIds)) {
+    return;
+  }
+
+  await admin.auth().setCustomUserClaims(uid, {
+    ...existingClaims,
+    currentClass,
+    classroomIds,
+  });
+}
+
+/** Keeps Auth claims aligned when `users/{uid}` classroom fields change client-side. */
+export const syncAuthClaimsOnUserWrite = onDocumentWritten(
+  'users/{uid}',
+  async (event) => {
+    const after = event.data?.after;
+    if (!after?.exists) return;
+
+    const before = event.data?.before;
+    const afterData = after.data() ?? {};
+    const beforeData = before?.exists ? (before.data() ?? {}) : null;
+
+    const classroomIdsChanged = beforeData == null ||
+      JSON.stringify(classroomIdsFromUserData(beforeData)) !==
+      JSON.stringify(classroomIdsFromUserData(afterData));
+    const currentClassChanged = beforeData == null ||
+      currentClassFromUserData(beforeData) !== currentClassFromUserData(afterData);
+
+    if (!classroomIdsChanged && !currentClassChanged) return;
+
+    await syncUserAuthClaims(event.params.uid);
+  },
+);
+
 async function moderateMessageText(
   text: string,
   authorUid: string,
 ): Promise<{flagged: boolean; moderationConfigured: boolean; localDemoMode?: boolean}> {
-  const trimmed = text.trim();
-  if (!trimmed) {
-    return {flagged: false, moderationConfigured: true};
+  const evaluation = await evaluateMessagePenalty(text);
+  if (evaluation.penaltyType) {
+    await applySafetyPenaltyForUid(authorUid, evaluation.penaltyType);
   }
-  if (trimmed.length > 4000) {
-    return {flagged: true, moderationConfigured: true};
-  }
-
-  if (LOCAL_DEMO_MODE) {
-    const lowered = trimmed.toLowerCase();
-    const flagged = lowered.includes('hate') || lowered.includes('bully');
-    if (flagged) {
-      await applySafetyPenaltyForUid(authorUid, 'cyberbullying');
-    }
-    return {flagged, moderationConfigured: false, localDemoMode: true};
-  }
-
-  const apiKey = resolveGoogleAiApiKey();
-  if (!apiKey) {
-    logger.error('moderateMessageText: GOOGLE_AI_API_KEY missing — blocking unchecked content.');
-    throw new HttpsError(
-      'failed-precondition',
-      'Moderation is not configured. Message cannot be delivered.',
-    );
-  }
-
-  const genAI = new GoogleGenerativeAI(apiKey);
-  const model = genAI.getGenerativeModel({
-    model: GEMINI_MODEL,
-    generationConfig: {responseMimeType: 'application/json'},
-  });
-
-  const moderationPrompt = [
-    'You are a moderation assistant for a Greek high-school student messaging app.',
-    'Analyze the message for cyberbullying, extreme aggression, or hateful behavior.',
-    'Return ONLY valid JSON: {"isBullying": boolean, "confidence": number, "reason": string}',
-    'Only mark isBullying true if confidence > 0.8.',
-    `Message: ${JSON.stringify(trimmed)}`,
-  ].join('\n');
-
-  let flagged = false;
-  try {
-    const result = await model.generateContent(moderationPrompt);
-    const responseText = extractTextFromGenerateResult(result);
-    const parsed = parseJsonObject<Record<string, unknown>>(responseText, {});
-    flagged = parsed.isBullying === true && Number(parsed.confidence ?? 0) > 0.8;
-  } catch (e) {
-    logger.error('moderateMessageText model error', e);
-    throw new HttpsError(
-      'unavailable',
-      'Moderation service temporarily unavailable.',
-    );
-  }
-
-  if (flagged) {
-    await applySafetyPenaltyForUid(authorUid, 'cyberbullying');
-  }
-  return {flagged, moderationConfigured: true};
+  return {
+    flagged: evaluation.flagged,
+    moderationConfigured: evaluation.moderationConfigured,
+    localDemoMode: evaluation.localDemoMode,
+  };
 }
 
 /** Rebuild direct-chat list preview from the latest message (or clear if empty). */
@@ -989,7 +1542,9 @@ async function deleteUserDataCompletely(uid: string): Promise<void> {
  * Primary Secure AI Chat Function
  * Handles usage limits, automated daily refreshes, and model interaction.
  */
-export const chatWithAi = onCall(async (request) => {
+export const chatWithAi = onCall(
+  {enforceAppCheck: true, secrets: [googleAiApiKey]},
+  async (request) => {
   // One outer try/catch so nothing (e.g. TypeError from bad request.data) becomes an uncaught 500/"internal".
   try {
     if (!request.auth) {
@@ -1010,9 +1565,13 @@ export const chatWithAi = onCall(async (request) => {
       depth?: string;
       images?: unknown;
       availableSubjects?: unknown;
+      streamId?: string;
     };
     const prompt = data.prompt;
     const history = data.history;
+    if (history !== undefined && history !== null && !Array.isArray(history)) {
+      throw new HttpsError('invalid-argument', 'history must be an array.');
+    }
     let isJson = !!data.isJson;
     let mode: AiMode = 'chat';
     if (data.mode === 'smart_notes') mode = 'smart_notes';
@@ -1021,6 +1580,9 @@ export const chatWithAi = onCall(async (request) => {
     const length = data.length ?? 'short';
     const depth = data.depth ?? 'basic';
     const userApiKey = sanitizeUserApiKey((data as Record<string, unknown>).userApiKey);
+    if (!LOCAL_DEMO_MODE && userApiKey) {
+      await assertByokProOnly(request.auth.uid, userApiKey);
+    }
     let imageBase64 = Array.isArray(data.images) ?
       data.images.filter((v): v is string => typeof v === 'string') :
       [];
@@ -1126,7 +1688,7 @@ export const chatWithAi = onCall(async (request) => {
       generationConfig: isJson ? {responseMimeType: 'application/json'} : undefined,
     });
 
-    const historyArr = Array.isArray(history) ? (history as Array<Record<string, unknown>>).slice(-CHAT_MAX_HISTORY_ITEMS) : [];
+    const historyArr = sanitizeChatHistoryForGemini(history);
 
     const effectivePrompt = mode === 'homework_ocr' ?
       buildHomeworkOcrPrompt(promptTrimmed, availableSubjects) :
@@ -1146,8 +1708,11 @@ export const chatWithAi = onCall(async (request) => {
       ...historyArr,
       {role: 'user', parts: userParts},
     ];
-    const result = await model.generateContent({contents: contents as never});
-    const responseText = extractTextFromGenerateResult(result);
+    const streamId = sanitizeStreamId(data.streamId);
+    const streamRef = streamId ?
+      db.collection('users').doc(uid).collection('ai_stream_chunks').doc(streamId) :
+      null;
+    const responseText = await generateTextWithStream(model, contents, streamRef);
 
     if (mode === 'homework_ocr') {
       const parsed = sanitizeHomeworkOcrResult(responseText);
@@ -1209,6 +1774,7 @@ export const chatWithAi = onCall(async (request) => {
 });
 
 export const generateExamQuiz = onCall(
+  {enforceAppCheck: true, secrets: [googleAiApiKey, tavilyApiKey]},
   async (request) => {
     const payloadPreview = (() => {
       const d = (request.data ?? {}) as Record<string, unknown>;
@@ -1238,6 +1804,9 @@ export const generateExamQuiz = onCall(
         userApiKey?: unknown;
       };
       const userApiKey = sanitizeUserApiKey(data.userApiKey);
+      if (!LOCAL_DEMO_MODE && userApiKey) {
+        await assertByokProOnly(uid, userApiKey);
+      }
       const topics = Array.isArray(data.topics) ?
         data.topics.filter((v): v is string => typeof v === 'string' && v.trim().length > 0) :
         [];
@@ -1245,18 +1814,28 @@ export const generateExamQuiz = onCall(
         data.questionType.filter((v): v is string => typeof v === 'string' && v.trim().length > 0) :
         [];
       const count = Number(data.count ?? 10);
-      const difficulty = firstNonEmptyString(data.difficulty) || 'μεσαίο';
-      const subjectName = firstNonEmptyString(data.subjectName);
+      const subjectName = requireClientTextField(
+        data.subjectName,
+        'subjectName',
+        EXAM_MAX_SUBJECT_NAME_CHARS,
+      );
+      const difficulty =
+        assertOptionalClientTextField(data.difficulty, 'difficulty', EXAM_MAX_DIFFICULTY_CHARS) ||
+        'μεσαίο';
       const language = firstNonEmptyString(data.language) || 'el';
-      const syllabusText = firstNonEmptyString(data.syllabusText);
+      const syllabusText = assertOptionalClientTextField(
+        data.syllabusText,
+        'syllabusText',
+        EXAM_MAX_SYLLABUS_TEXT_CHARS,
+      );
       const base64Images = Array.isArray(data.base64Images) ?
         data.base64Images
           .filter((v): v is string => typeof v === 'string' && v.trim().length > 0)
           .slice(0, 6)
           .map((v) => (v.length > CHAT_MAX_IMAGE_B64_CHARS ? v.slice(0, CHAT_MAX_IMAGE_B64_CHARS) : v)) :
         [];
-      if (!subjectName || questionType.length === 0) {
-        throw new HttpsError('invalid-argument', 'subjectName and questionType are required.');
+      if (questionType.length === 0) {
+        throw new HttpsError('invalid-argument', 'questionType is required.');
       }
       if (topics.length === 0 && !syllabusText && base64Images.length === 0) {
         throw new HttpsError('invalid-argument', 'Provide at least topics, syllabusText, or scanned images.');
@@ -1395,6 +1974,7 @@ export const generateExamQuiz = onCall(
 );
 
 export const scoreOpenQuizAttempt = onCall(
+  {enforceAppCheck: true, secrets: [googleAiApiKey]},
   async (request) => {
     const payloadPreview = (() => {
       const d = (request.data ?? {}) as Record<string, unknown>;
@@ -1417,18 +1997,21 @@ export const scoreOpenQuizAttempt = onCall(
         userApiKey?: unknown;
       };
       const userApiKey = sanitizeUserApiKey(data.userApiKey);
+      if (!LOCAL_DEMO_MODE && userApiKey) {
+        await assertByokProOnly(uid, userApiKey);
+      }
       const quizId = firstNonEmptyString(data.quizId);
       const attemptId = firstNonEmptyString(data.attemptId);
-      const openQuestions = Array.isArray(data.openQuestions) ?
-        data.openQuestions.filter((q): q is Record<string, unknown> => !!q && typeof q === 'object') :
-        [];
-      const answers = data.answers && typeof data.answers === 'object' ?
-        (data.answers as Record<string, unknown>) :
-        {};
       const language = firstNonEmptyString(data.language) || 'el';
-      if (!quizId || openQuestions.length === 0) {
-        throw new HttpsError('invalid-argument', 'quizId and openQuestions are required.');
+      if (!quizId) {
+        throw new HttpsError('invalid-argument', 'quizId is required.');
       }
+      const openQuestions = sanitizeOpenQuestions(data.openQuestions);
+      const answers = sanitizeQuizAnswersByIndex(data.answers, openQuestions);
+
+      const ownedQuizData = LOCAL_DEMO_MODE ?
+        null :
+        await assertExamQuizOwnedByUid(quizId, uid);
 
       if (LOCAL_DEMO_MODE) {
         const questionScores = openQuestions.map((_, index) => ({
@@ -1471,8 +2054,7 @@ export const scoreOpenQuizAttempt = onCall(
         await consumeSparksOrThrow(uid, 1);
       }
 
-      const quizSnap = await db.collection('exam_quizzes').doc(quizId).get();
-      const quizData = quizSnap.data() ?? {};
+      const quizData = ownedQuizData ?? {};
       const sourceContext = {
         subjectName: firstNonEmptyString(quizData.subjectName),
         topics: Array.isArray(quizData.topics) ? quizData.topics : [],
@@ -1554,34 +2136,49 @@ export const scoreOpenQuizAttempt = onCall(
  * Applies safety moderation fields on the user document (server-side only).
  * Clients cannot write safetyScore / bans directly (see Firestore rules).
  *
- * ARCHITECTURE NOTE (portfolio context):
- * This callable applies the penalty to request.auth.uid — the *calling* user.
- * The intended flow is: client calls moderateStudentMessage → server detects a
- * violation → client calls applySafetyPenalty to record it server-side.
- *
- * Limitation: a client can skip calling this function after sending a bad message,
- * bypassing moderation recording. A production-grade system would move the penalty
- * application *inside* moderateStudentMessage (or a Firestore onCreate trigger),
- * removing the client's choice entirely. This design is intentional here to
- * demonstrate the server-authoritative pattern while keeping the client API simple
- * for a portfolio/showcase context.
+ * Penalty severity is derived from a fresh [evaluateMessagePenalty] run on `text`;
+ * the client cannot supply or influence the penalty type.
  */
 export const applySafetyPenalty = onCall(async (request) => {
   if (!request.auth) {
     throw new HttpsError('unauthenticated', 'User must be signed in.');
   }
   const uid = request.auth.uid;
-  const {penaltyType} = request.data as {penaltyType?: string};
-  if (!penaltyType || !['profanity', 'cyberbullying', 'reported'].includes(penaltyType)) {
-    throw new HttpsError('invalid-argument', 'Invalid penaltyType.');
+  const textRaw = (request.data as {text?: unknown})?.text;
+  const text = typeof textRaw === 'string' ? textRaw.trim() : '';
+  if (!text) {
+    throw new HttpsError('invalid-argument', 'text is required.');
   }
-  await applySafetyPenaltyForUid(uid, penaltyType as PenaltyTypeName);
+  if (text.length > 4000) {
+    throw new HttpsError('invalid-argument', 'Message too long for moderation.');
+  }
+
+  const evaluation = await evaluateMessagePenalty(text);
+  if (!evaluation.penaltyType) {
+    return {
+      applied: false,
+      flagged: evaluation.flagged,
+      moderationConfigured: evaluation.moderationConfigured,
+      localDemoMode: evaluation.localDemoMode ?? false,
+    };
+  }
+
+  await applySafetyPenaltyForUid(uid, evaluation.penaltyType);
+  return {
+    applied: true,
+    penaltyType: evaluation.penaltyType,
+    flagged: true,
+    moderationConfigured: evaluation.moderationConfigured,
+    localDemoMode: evaluation.localDemoMode ?? false,
+  };
 });
 
 /**
  * Server-side moderation for chat/DM text (replaces client-side Vertex calls).
  */
-export const moderateStudentMessage = onCall(async (request) => {
+export const moderateStudentMessage = onCall(
+  {secrets: [googleAiApiKey]},
+  async (request) => {
   if (!request.auth) {
     throw new HttpsError('unauthenticated', 'User must be signed in.');
   }
@@ -1941,6 +2538,7 @@ export const classroomRemoveMemberAdmin = onCall(async (request) => {
       classroomIds: admin.firestore.FieldValue.arrayRemove(classroomId),
     });
   });
+  await syncUserAuthClaims(targetUserId);
   return {ok: true};
 });
 
@@ -1981,6 +2579,78 @@ export const classroomDeleteWithCleanup = onCall(async (request) => {
   }
   batch.delete(db.collection('classrooms').doc(classroomId));
   await batch.commit();
+  for (const m of members) {
+    await syncUserAuthClaims(m);
+  }
+  return {ok: true};
+});
+
+/**
+ * After creating a classroom, registers `classroomIds` on the caller's user doc
+ * (client updates to `classroomIds` are blocked in Firestore rules).
+ */
+export const classroomRegisterMembership = onCall(async (request) => {
+  if (!request.auth) {
+    throw new HttpsError('unauthenticated', 'User must be signed in.');
+  }
+  const uid = request.auth.uid;
+  const classroomId = typeof (request.data as {classroomId?: unknown})?.classroomId === 'string' ?
+    String((request.data as {classroomId: string}).classroomId).trim() :
+    '';
+  if (!classroomId) {
+    throw new HttpsError('invalid-argument', 'classroomId is required.');
+  }
+
+  const cref = db.collection('classrooms').doc(classroomId);
+  const snap = await cref.get();
+  if (!snap.exists) {
+    throw new HttpsError('not-found', 'Classroom not found.');
+  }
+  const members = (snap.data()?.members as string[] | undefined) ?? [];
+  if (!members.includes(uid)) {
+    throw new HttpsError('permission-denied', 'You are not a member of this classroom.');
+  }
+
+  await db.collection('users').doc(uid).update({
+    classroomIds: admin.firestore.FieldValue.arrayUnion(classroomId),
+  });
+  await syncUserAuthClaims(uid);
+  return {ok: true};
+});
+
+/** Member leaves a classroom (updates membership + Auth claims). */
+export const classroomLeaveMember = onCall(async (request) => {
+  if (!request.auth) {
+    throw new HttpsError('unauthenticated', 'User must be signed in.');
+  }
+  const uid = request.auth.uid;
+  const classroomId = typeof (request.data as {classroomId?: unknown})?.classroomId === 'string' ?
+    String((request.data as {classroomId: string}).classroomId).trim() :
+    '';
+  if (!classroomId) {
+    throw new HttpsError('invalid-argument', 'classroomId is required.');
+  }
+
+  const cref = db.collection('classrooms').doc(classroomId);
+  const snap = await cref.get();
+  if (!snap.exists) {
+    throw new HttpsError('not-found', 'Classroom not found.');
+  }
+  const members = (snap.data()?.members as string[] | undefined) ?? [];
+  if (!members.includes(uid)) {
+    throw new HttpsError('failed-precondition', 'You are not a member of this classroom.');
+  }
+
+  await db.runTransaction(async (tx) => {
+    tx.update(cref, {
+      members: admin.firestore.FieldValue.arrayRemove(uid),
+      adminIds: admin.firestore.FieldValue.arrayRemove(uid),
+    });
+    tx.update(db.collection('users').doc(uid), {
+      classroomIds: admin.firestore.FieldValue.arrayRemove(classroomId),
+    });
+  });
+  await syncUserAuthClaims(uid);
   return {ok: true};
 });
 
@@ -2000,16 +2670,9 @@ export const completeStudentOnboarding = onCall(async (request) => {
     tutoringSubjects?: unknown;
     birthDateMillis?: unknown;
   };
-  const currentClass = typeof data.currentClass === 'string' ? data.currentClass.trim() : '';
-  if (!currentClass) {
-    throw new HttpsError('invalid-argument', 'currentClass is required.');
-  }
-  const birthMs = typeof data.birthDateMillis === 'number' ? data.birthDateMillis :
-    typeof data.birthDateMillis === 'string' ? Number(data.birthDateMillis) : NaN;
-  if (!Number.isFinite(birthMs)) {
-    throw new HttpsError('invalid-argument', 'birthDateMillis is required.');
-  }
-  const birthDate = new Date(birthMs);
+  const currentClass = sanitizeCurrentClass(data.currentClass);
+  const birthDate = sanitizeBirthDateMillis(data.birthDateMillis);
+  const ageYears = computeAgeFromBirthDate(birthDate);
   const subjects = Array.isArray(data.subjects) ?
     data.subjects.filter((s): s is string => typeof s === 'string') :
     [];
@@ -2018,13 +2681,12 @@ export const completeStudentOnboarding = onCall(async (request) => {
     data.tutoringSubjects.filter((s): s is string => typeof s === 'string') :
     [];
 
-  const now = new Date();
-  let age = now.getFullYear() - birthDate.getFullYear();
-  const m = now.getMonth() - birthDate.getMonth();
-  if (m < 0 || (m === 0 && now.getDate() < birthDate.getDate())) {
-    age--;
-  }
-  const hasParentalConsent = age >= 15;
+  const consentState = await writeParentalConsentEligibilityPrivate(uid, {
+    birthDate,
+    ageYears,
+    hasParentalConsent: deriveParentalConsentFromAge(ageYears).hasParentalConsent,
+    source: 'onboarding',
+  });
 
   const userRef = db.collection('users').doc(uid);
   await userRef.set({
@@ -2034,7 +2696,7 @@ export const completeStudentOnboarding = onCall(async (request) => {
     tutoringSubjects,
     isProfileComplete: true,
     birthDate: admin.firestore.Timestamp.fromDate(birthDate),
-    hasParentalConsent,
+    hasParentalConsent: consentState.hasParentalConsent,
   }, {merge: true});
 
   const snap = await userRef.get();
@@ -2054,8 +2716,54 @@ export const completeStudentOnboarding = onCall(async (request) => {
     isProfileComplete: true,
   }, {merge: true});
 
-  return {ok: true, hasParentalConsent};
+  await syncUserAuthClaims(uid);
+
+  return {ok: true, hasParentalConsent: consentState.hasParentalConsent};
 });
+
+/**
+ * Applies server-owned defaults on `users/{uid}` create (billing, moderation, consent, friends).
+ * Clients cannot set these fields on create (see Firestore rules); [AppUser.toClientWriteMap] omits them.
+ */
+export const initializeUserPrivilegedFields = onDocumentCreated(
+  'users/{userId}',
+  async (event) => {
+    const snap = event.data;
+    if (!snap) return;
+
+    const data = snap.data();
+    const patch: Record<string, unknown> = {};
+
+    if (!('aiSparks' in data)) {
+      patch.aiSparks = PLAN_LIMITS.free;
+    }
+    if (!('subscriptionType' in data)) {
+      patch.subscriptionType = 'free';
+    }
+    if (!('lastSparksRefresh' in data)) {
+      patch.lastSparksRefresh = admin.firestore.FieldValue.serverTimestamp();
+    }
+    if (!('safetyScore' in data)) {
+      patch.safetyScore = 100;
+    }
+    if (!('offenseCount' in data)) {
+      patch.offenseCount = 0;
+    }
+    if (!('reportsCount' in data)) {
+      patch.reportsCount = 0;
+    }
+    if (!('hasParentalConsent' in data)) {
+      patch.hasParentalConsent = false;
+    }
+    if (!('friends' in data)) {
+      patch.friends = [];
+    }
+
+    if (Object.keys(patch).length > 0) {
+      await snap.ref.set(patch, {merge: true});
+    }
+  },
+);
 
 /** Join a classroom using a valid invite code (rules block client-side member self-join). */
 export const classroomJoinWithInviteCode = onCall(async (request) => {
@@ -2103,6 +2811,7 @@ export const classroomJoinWithInviteCode = onCall(async (request) => {
   await db.collection('users').doc(uid).update({
     classroomIds: admin.firestore.FieldValue.arrayUnion(classroomId),
   });
+  await syncUserAuthClaims(uid);
 
   return {
     ok: true,
@@ -2155,6 +2864,8 @@ export const updateStudentCurrentClass = onCall(async (request) => {
   if (!postsSnap.empty) {
     await batch.commit();
   }
+
+  await syncUserAuthClaims(uid);
 
   return {ok: true, currentClass};
 });
@@ -2241,6 +2952,22 @@ async function postEmailJsParentalConsentEmail(params: {
 const PRO_ACTIVATION_CODE_TTL_MS = 15 * 60 * 1000;
 const PRO_ACTIVATION_SEND_COOLDOWN_MS = 60 * 1000;
 const PRO_ACTIVATION_MAX_ATTEMPTS = 8;
+const CONSENT_VERIFY_MAX_ATTEMPTS = 25;
+
+async function incrementConsentVerifyAttemptOrThrow(uidStr: string): Promise<void> {
+  const attemptsRef = db.collection('consent_verify_attempts').doc(uidStr);
+  await db.runTransaction(async (tx) => {
+    const snap = await tx.get(attemptsRef);
+    const attemptCount = (snap.data()?.count as number | undefined) ?? 0;
+    if (attemptCount >= CONSENT_VERIFY_MAX_ATTEMPTS) {
+      throw new HttpsError('resource-exhausted', 'Too many verification attempts. Try again later.');
+    }
+    tx.set(attemptsRef, {
+      count: attemptCount + 1,
+      lastAt: admin.firestore.FieldValue.serverTimestamp(),
+    }, {merge: true});
+  });
+}
 
 function normalizeAccountEmail(email: string): string {
   return email.trim().toLowerCase();
@@ -2365,6 +3092,7 @@ function proActivationClearsPayload(): Record<string, admin.firestore.FieldValue
  */
 export const sendProActivationCode = onCall(
   {
+    enforceAppCheck: true,
     secrets: [
       proActivationEmailJsServiceId,
       proActivationEmailJsTemplateId,
@@ -2420,33 +3148,33 @@ export const sendProActivationCode = onCall(
     }
 
     const privRef = db.collection('user_private').doc(uid);
-    const privSnap = await privRef.get();
-    const pdata = privSnap.data() ?? {};
-    const lastSent = pdata.proActivationLastSentAt as admin.firestore.Timestamp | undefined;
-    if (lastSent) {
-      const elapsed = Date.now() - lastSent.toMillis();
-      if (elapsed >= 0 && elapsed < PRO_ACTIVATION_SEND_COOLDOWN_MS) {
-        throw new HttpsError(
-          'resource-exhausted',
-          'Please wait a minute before requesting another activation code.',
-        );
-      }
-    }
 
     const plainCode = `${randomInt(0, 1_000_000)}`.padStart(6, '0');
     const codeHash = hashProActivationCode(uid, tokenEmailNorm, plainCode, pepper);
 
-    await privRef.set(
-      {
+    await db.runTransaction(async (tx) => {
+      const privSnap = await tx.get(privRef);
+      const pdata = privSnap.data() ?? {};
+      const lastSent = pdata.proActivationLastSentAt as admin.firestore.Timestamp | undefined;
+      if (lastSent) {
+        const elapsed = Date.now() - lastSent.toMillis();
+        if (elapsed >= 0 && elapsed < PRO_ACTIVATION_SEND_COOLDOWN_MS) {
+          throw new HttpsError(
+            'resource-exhausted',
+            'Please wait a minute before requesting another activation code.',
+          );
+        }
+      }
+      tx.set(privRef, {
         proActivationCodeHash: codeHash,
         proActivationExpiresAt: admin.firestore.Timestamp.fromMillis(
           Date.now() + PRO_ACTIVATION_CODE_TTL_MS,
         ),
         proActivationEmailNorm: tokenEmailNorm,
         proActivationAttempts: 0,
-      },
-      {merge: true},
-    );
+        proActivationLastSentAt: admin.firestore.FieldValue.serverTimestamp(),
+      }, {merge: true});
+    });
 
     try {
       if (!LOCAL_DEMO_MODE) {
@@ -2477,13 +3205,6 @@ export const sendProActivationCode = onCall(
       } else {
         logger.warn('LOCAL_DEMO_MODE: skipping activation email send.', {uid});
       }
-
-      await privRef.set(
-        {
-          proActivationLastSentAt: admin.firestore.FieldValue.serverTimestamp(),
-        },
-        {merge: true},
-      );
     } catch (e: unknown) {
       await privRef.set(proActivationClearsPayload(), {merge: true});
       if (e instanceof HttpsError) throw e;
@@ -2505,7 +3226,7 @@ export const sendProActivationCode = onCall(
  * Validates the OTP and upgrades `subscriptionType` to `pro`. Client cannot write quota fields directly.
  */
 export const verifyProActivationAndUnlock = onCall(
-  {secrets: [proActivationCodePepper]},
+  {enforceAppCheck: true, secrets: [proActivationCodePepper]},
   async (request) => {
     if (!request.auth) {
       throw new HttpsError('unauthenticated', 'User must be signed in.');
@@ -2630,7 +3351,7 @@ export const verifyProActivationAndUnlock = onCall(
  * Confirms parental consent using the secure token from the email link.
  * Callable without Firebase Auth (parent may not have an account).
  */
-export const verifyParentalConsent = onCall(async (request) => {
+export const verifyParentalConsent = onCall({enforceAppCheck: true}, async (request) => {
   const {uid, token} = (request.data ?? {}) as {uid?: unknown; token?: unknown};
   const uidStr = typeof uid === 'string' ? uid.trim() : '';
   const tokenStr = typeof token === 'string' ? token.trim() : '';
@@ -2638,18 +3359,10 @@ export const verifyParentalConsent = onCall(async (request) => {
     throw new HttpsError('invalid-argument', 'uid and token are required.');
   }
 
-  const attemptsRef = db.collection('consent_verify_attempts').doc(uidStr);
-  const attemptsSnap = await attemptsRef.get();
-  const attemptCount = (attemptsSnap.data()?.count as number | undefined) ?? 0;
-  if (attemptCount >= 25) {
-    throw new HttpsError('resource-exhausted', 'Too many verification attempts. Try again later.');
-  }
-  await attemptsRef.set({
-    count: attemptCount + 1,
-    lastAt: admin.firestore.FieldValue.serverTimestamp(),
-  }, {merge: true});
+  await incrementConsentVerifyAttemptOrThrow(uidStr);
 
   const userRef = db.collection('users').doc(uidStr);
+  const attemptsRef = db.collection('consent_verify_attempts').doc(uidStr);
   const snap = await userRef.get();
   if (!snap.exists) {
     throw new HttpsError('not-found', 'User not found.');
@@ -2671,11 +3384,33 @@ export const verifyParentalConsent = onCall(async (request) => {
     throw new HttpsError('deadline-exceeded', 'Consent link has expired. Please request a new one.');
   }
 
+  const birthTs = data.birthDate as admin.firestore.Timestamp | undefined;
+  const birthDate = birthTs?.toDate();
+  const ageYears = birthDate ? computeAgeFromBirthDate(birthDate) : PARENTAL_CONSENT_MIN_AGE_YEARS;
+
   await userRef.update({
     hasParentalConsent: true,
     consentVerificationStatus: 'approved',
     consentToken: `verified_${tokenStr}`,
   });
+
+  if (birthDate) {
+    await writeParentalConsentEligibilityPrivate(uidStr, {
+      birthDate,
+      ageYears,
+      hasParentalConsent: true,
+      source: 'parent_verified',
+    });
+  } else {
+    await db.collection('user_private').doc(uidStr).set({
+      parentalConsentEligibility: {
+        hasParentalConsent: true,
+        requiresParentalConsent: true,
+        source: 'parent_verified',
+        updatedAt: admin.firestore.FieldValue.serverTimestamp(),
+      },
+    }, {merge: true});
+  }
 
   await attemptsRef.delete();
 
@@ -2688,6 +3423,7 @@ export const verifyParentalConsent = onCall(async (request) => {
  */
 export const requestParentalConsent = onCall(
   {
+    enforceAppCheck: true,
     secrets: [emailJsServiceId, emailJsTemplateId, emailJsPublicKey, emailJsPrivateKey],
   },
   async (request) => {
@@ -2706,6 +3442,10 @@ export const requestParentalConsent = onCall(
 
     const token = generateConsentToken();
 
+    const userDoc = await db.collection('users').doc(uid).get();
+    const birthTs = userDoc.data()?.birthDate as admin.firestore.Timestamp | undefined;
+    const birthDate = birthTs?.toDate();
+
     await db.collection('users').doc(uid).update({
       parentEmail: parentEmailTrim,
       consentVerificationStatus: 'pending',
@@ -2716,7 +3456,14 @@ export const requestParentalConsent = onCall(
       hasParentalConsent: false,
     });
 
-    const userDoc = await db.collection('users').doc(uid).get();
+    if (birthDate) {
+      await writeParentalConsentEligibilityPrivate(uid, {
+        birthDate,
+        ageYears: computeAgeFromBirthDate(birthDate),
+        hasParentalConsent: false,
+        source: 'onboarding',
+      });
+    }
     const fullName = ((userDoc.data()?.fullName as string) ?? '').trim();
     const studentName = fullName || 'Student';
 
@@ -2752,17 +3499,33 @@ export const requestParentalConsent = onCall(
  * Clears the parental-consent fields for the calling user.
  * Must use Admin SDK because Firestore rules block client writes to these fields.
  */
-export const resetParentalConsent = onCall(async (request) => {
+export const resetParentalConsent = onCall({enforceAppCheck: true}, async (request) => {
   if (!request.auth) {
     throw new HttpsError('unauthenticated', 'User must be signed in.');
   }
   const uid = request.auth.uid;
+  const userSnap = await db.collection('users').doc(uid).get();
+  const birthTs = userSnap.data()?.birthDate as admin.firestore.Timestamp | undefined;
+  const birthDate = birthTs?.toDate();
+
   await db.collection('users').doc(uid).update({
     parentEmail: admin.firestore.FieldValue.delete(),
     consentVerificationStatus: admin.firestore.FieldValue.delete(),
     consentToken: admin.firestore.FieldValue.delete(),
     hasParentalConsent: admin.firestore.FieldValue.delete(),
   });
+
+  if (birthDate) {
+    const ageYears = computeAgeFromBirthDate(birthDate);
+    const resetConsent = deriveParentalConsentFromAge(ageYears);
+    await writeParentalConsentEligibilityPrivate(uid, {
+      birthDate,
+      ageYears,
+      hasParentalConsent: resetConsent.hasParentalConsent,
+      source: 'reset',
+    });
+  }
+
   return {ok: true};
 });
 
@@ -3019,7 +3782,10 @@ export const enforceUniqueDeviceToken = onDocumentCreated(
 );
 
 export const moderateClassroomMessageOnCreate = onDocumentCreated(
-  'classrooms/{classroomId}/messages/{messageId}',
+  {
+    document: 'classrooms/{classroomId}/messages/{messageId}',
+    secrets: [googleAiApiKey],
+  },
   async (event) => {
     const data = event.data?.data();
     if (!data || !event.data) return;
@@ -3039,7 +3805,10 @@ export const moderateClassroomMessageOnCreate = onDocumentCreated(
 );
 
 export const notifyDirectMessage = onDocumentCreated(
-  'direct_chats/{chatId}/messages/{messageId}',
+  {
+    document: 'direct_chats/{chatId}/messages/{messageId}',
+    secrets: [googleAiApiKey],
+  },
   async (event) => {
     const data = event.data?.data();
     if (!data || !event.data) return;

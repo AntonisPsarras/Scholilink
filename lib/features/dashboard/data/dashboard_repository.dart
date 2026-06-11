@@ -115,25 +115,13 @@ class FirestoreDashboardRepository implements DashboardRepository {
       final snapshot = await _firestore
           .collection('homework_posts')
           .where('classId', isEqualTo: classId)
+          .orderBy('dueDate')
+          .limit(30)
           .get();
 
-      final posts = snapshot.docs
+      return snapshot.docs
           .map((doc) => HomeworkPost.fromMap({...doc.data(), 'postId': doc.id}))
           .toList();
-
-      // Sort posts chronologically by due date (upcoming first)
-      // Items without a due date go to the end
-      posts.sort((a, b) {
-        if (a.dueDate == null && b.dueDate == null) {
-          return b.timestamp.compareTo(a.timestamp); // Fallback to newest first
-        }
-        if (a.dueDate == null) return 1;
-        if (b.dueDate == null) return -1;
-
-        return a.dueDate!.compareTo(b.dueDate!);
-      });
-
-      return posts;
     } catch (e) {
       if (e is FirebaseException && e.code == 'permission-denied') {
         return [];
@@ -170,6 +158,8 @@ class FirestoreDashboardRepository implements DashboardRepository {
           .collection('messages')
           .where('type', isEqualTo: 'academic')
           .where('isBroadcasted', isEqualTo: true)
+          .orderBy('timestamp', descending: true)
+          .limit(30)
           .snapshots()
           .map(
             (snap) => snap.docs
@@ -675,66 +665,84 @@ class FirestoreDashboardRepository implements DashboardRepository {
     await _firestore.collection('exams').doc(examId).delete();
   }
 
+  Map<DateTime, List<Map<String, dynamic>>> _examSnapshotToCalendarEvents(
+    QuerySnapshot<Map<String, dynamic>> examSnap,
+  ) {
+    final events = <DateTime, List<Map<String, dynamic>>>{};
+    for (final doc in examSnap.docs) {
+      final exam = Exam.fromMap(doc.data(), doc.id);
+      final key = DateTime(exam.date.year, exam.date.month, exam.date.day);
+      events.putIfAbsent(key, () => []).add({
+        'type': 'exam',
+        'title': exam.subject,
+        'description': exam.description,
+        'id': doc.id,
+      });
+    }
+    return events;
+  }
+
+  Map<DateTime, List<Map<String, dynamic>>> _deadlineSnapshotToCalendarEvents(
+    QuerySnapshot<Map<String, dynamic>> deadlineSnap,
+  ) {
+    final events = <DateTime, List<Map<String, dynamic>>>{};
+    for (final doc in deadlineSnap.docs) {
+      final deadline = Deadline.fromMap(doc.data(), doc.id);
+      final key = DateTime(
+        deadline.date.year,
+        deadline.date.month,
+        deadline.date.day,
+      );
+      events.putIfAbsent(key, () => []).add({
+        'type': deadline.isPresentation ? 'presentation' : 'project',
+        'title': deadline.title,
+        'description':
+            '${deadline.subject}${deadline.description.isNotEmpty ? ' - ${deadline.description}' : ''}',
+        'id': doc.id,
+      });
+    }
+    return events;
+  }
+
+  Map<DateTime, List<Map<String, dynamic>>> _mergeCalendarEventMaps(
+    Map<DateTime, List<Map<String, dynamic>>> exams,
+    Map<DateTime, List<Map<String, dynamic>>> deadlines,
+  ) {
+    final merged = <DateTime, List<Map<String, dynamic>>>{
+      for (final entry in exams.entries) entry.key: List.from(entry.value),
+    };
+    for (final entry in deadlines.entries) {
+      merged.putIfAbsent(entry.key, () => []).addAll(entry.value);
+    }
+    return merged;
+  }
+
   @override
   Stream<Map<DateTime, List<Map<String, dynamic>>>> watchCalendarEvents(
     String classId,
   ) {
     final now = DateTime.now();
     final startOfToday = DateTime(now.year, now.month, now.day);
-    // Watch both exams + deadlines collections for this class
+    final startTs = Timestamp.fromDate(startOfToday);
+
     final examStream = _firestore
         .collection('exams')
         .where('classId', isEqualTo: classId)
-        .where('date', isGreaterThanOrEqualTo: Timestamp.fromDate(startOfToday))
+        .where('date', isGreaterThanOrEqualTo: startTs)
         .orderBy('date')
-        .snapshots();
+        .snapshots()
+        .map(_examSnapshotToCalendarEvents);
 
-    // Watch exams in real-time; deadlines are fetched as a one-shot alongside each exam update
-    return examStream.asyncMap((examSnap) async {
-      final Map<DateTime, List<Map<String, dynamic>>> events = {};
+    final deadlineStream = _firestore
+        .collection('deadlines')
+        .where('classId', isEqualTo: classId)
+        .where('date', isGreaterThanOrEqualTo: startTs)
+        .orderBy('date')
+        .snapshots()
+        .map(_deadlineSnapshotToCalendarEvents)
+        .onErrorReturn(<DateTime, List<Map<String, dynamic>>>{});
 
-      for (final doc in examSnap.docs) {
-        final exam = Exam.fromMap(doc.data(), doc.id);
-        final key = DateTime(exam.date.year, exam.date.month, exam.date.day);
-        events.putIfAbsent(key, () => []).add({
-          'type': 'exam',
-          'title': exam.subject,
-          'description': exam.description,
-          'id': doc.id,
-        });
-      }
-
-      // Fetch deadlines as a one-shot alongside
-      try {
-        final deadlineSnap = await _firestore
-            .collection('deadlines')
-            .where('classId', isEqualTo: classId)
-            .where(
-              'date',
-              isGreaterThanOrEqualTo: Timestamp.fromDate(startOfToday),
-            )
-            .orderBy('date')
-            .get();
-
-        for (final doc in deadlineSnap.docs) {
-          final deadline = Deadline.fromMap(doc.data(), doc.id);
-          final key = DateTime(
-            deadline.date.year,
-            deadline.date.month,
-            deadline.date.day,
-          );
-          events.putIfAbsent(key, () => []).add({
-            'type': deadline.isPresentation ? 'presentation' : 'project',
-            'title': deadline.title,
-            'description':
-                '${deadline.subject}${deadline.description.isNotEmpty ? ' - ${deadline.description}' : ''}',
-            'id': doc.id,
-          });
-        }
-      } catch (_) {}
-
-      return events;
-    });
+    return Rx.combineLatest2(examStream, deadlineStream, _mergeCalendarEventMaps);
   }
 
   // --- Deadlines ---

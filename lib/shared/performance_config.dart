@@ -32,7 +32,7 @@ class PerformanceConfig {
   /// Disabled on low-end devices; also gated by reduced motion (see [shouldUseJellyScroll]).
   static bool useJellyScroll = true;
 
-  /// Blur sigma to use when blur is enabled. Reduced on mid-tier devices.
+  /// Blur sigma to use when blur is enabled (high-end only; mid/low use 0).
   static double blurSigma = 12.0;
 
   /// Liquid gradient animation: tier flag plus system "reduce motion" / disable animations.
@@ -89,13 +89,12 @@ class PerformanceConfig {
       useJellyScroll = false;
       blurSigma = 0.0;
     } else if (totalLogicalPixels < midThreshold) {
-      // Mid-tier: reduce intensity — no animated background (saves full-screen
-      // GPU fill every frame), light blur only, no breathing scale loop.
-      useBlur = true;
+      // Mid-tier: static gradient only — no blur, jelly, or breathing loops.
+      useBlur = false;
       useBreathingAnimation = false;
       useAnimatedBackground = false;
-      useJellyScroll = true;
-      blurSigma = 5.0;
+      useJellyScroll = false;
+      blurSigma = 0.0;
     } else {
       // High-end (tablets, desktop, large foldables): all effects enabled,
       // but cap blur sigma at 12 instead of the old 15 for a safety margin.

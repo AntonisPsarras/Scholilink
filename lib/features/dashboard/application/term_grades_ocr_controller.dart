@@ -1,13 +1,13 @@
-import 'dart:convert';
-
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../core/firebase_functions_helpers.dart';
 import '../../../core/ai_key_store.dart';
+import '../../auth/data/auth_repository.dart';
 import '../../../core/spark_limit_message.dart';
 import '../../../core/spark_sync.dart';
+import '../../../shared/ocr_image_bytes.dart';
 import '../utils/subject_name_matcher.dart';
 
 class OcrGradeRow {
@@ -78,14 +78,19 @@ class TermGradesOcrController extends StateNotifier<TermGradesOcrState> {
     state = const TermGradesOcrState(isLoading: true, error: null);
     try {
       await refreshAuthTokenForCallable();
-      final userApiKey = await _ref.read(aiKeyStoreProvider).readGeminiApiKey();
+      final userApiKey = await _ref
+          .read(aiKeyStoreProvider)
+          .readGeminiApiKeyIfEligible(
+            _ref.read(authStateProvider).valueOrNull?.subscriptionType,
+          );
+      final imageB64 = await base64EncodeImageBytesInIsolate(imageBytes);
       final response = await chatWithAiCallable().call({
         'mode': 'term_grades_ocr',
         'prompt': isGreek
             ? 'Ανάλυσε τον βαθμολογικό έλεγχο και βγάλε μαθήματα/βαθμούς.'
             : 'Parse this report card and extract subject grades.',
         'isJson': true,
-        'images': [base64Encode(imageBytes)],
+        'images': [imageB64],
         'availableSubjects': availableSubjects,
         'history': const <Map<String, dynamic>>[],
         if (userApiKey != null) 'userApiKey': userApiKey,

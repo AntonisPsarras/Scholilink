@@ -7,6 +7,7 @@ import 'package:firebase_core/firebase_core.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 
+import '../../../core/ai_key_store.dart';
 import '../../../core/firebase_functions_helpers.dart';
 import '../domain/exam_quiz.dart';
 import '../domain/quiz_attempt.dart';
@@ -24,6 +25,7 @@ abstract class ExamReadinessRepository {
     String syllabusText = '',
     List<File> scannedImages = const <File>[],
     String language = 'el',
+    String? subscriptionType,
   });
 
   Future<Map<String, dynamic>> scoreOpenQuizAttempt({
@@ -32,6 +34,7 @@ abstract class ExamReadinessRepository {
     required List<Map<String, dynamic>> openQuestions,
     required Map<String, String> answers,
     String language = 'el',
+    String? subscriptionType,
   });
 
   Future<void> saveQuizAttempt(String userId, QuizAttempt attempt);
@@ -53,24 +56,19 @@ class FirestoreExamReadinessRepository implements ExamReadinessRepository {
   FirestoreExamReadinessRepository({
     FirebaseFirestore? firestore,
     FirebaseFunctions? functions,
+    AiKeyStore? aiKeyStore,
   }) : _firestore = firestore ?? FirebaseFirestore.instance,
        _functions =
            functions ??
            FirebaseFunctions.instanceFor(
              app: Firebase.app(),
              region: 'us-central1',
-           );
+           ),
+       _aiKeyStore = aiKeyStore ?? const AiKeyStore(FlutterSecureStorage());
 
   final FirebaseFirestore _firestore;
   final FirebaseFunctions _functions;
-  static const FlutterSecureStorage _storage = FlutterSecureStorage();
-  static const String _geminiApiKeyStorageKey = 'gemini_api_key';
-
-  Future<String?> _readUserApiKey() async {
-    final raw = await _storage.read(key: _geminiApiKeyStorageKey);
-    final trimmed = raw?.trim() ?? '';
-    return trimmed.isEmpty ? null : trimmed;
-  }
+  final AiKeyStore _aiKeyStore;
 
   @override
   Future<ExamQuiz> generateExamQuiz({
@@ -83,6 +81,7 @@ class FirestoreExamReadinessRepository implements ExamReadinessRepository {
     String syllabusText = '',
     List<File> scannedImages = const <File>[],
     String language = 'el',
+    String? subscriptionType,
   }) async {
     await refreshAuthTokenForCallable();
     final callable = _functions.httpsCallable(
@@ -95,7 +94,9 @@ class FirestoreExamReadinessRepository implements ExamReadinessRepository {
         final bytes = await file.readAsBytes();
         base64Images.add(base64Encode(bytes));
       }
-      final userApiKey = await _readUserApiKey();
+      final userApiKey = await _aiKeyStore.readGeminiApiKeyIfEligible(
+        subscriptionType,
+      );
       final res = await callable.call({
         'topics': topics,
         'questionType': questionTypes.map(quizQuestionTypeToString).toList(),
@@ -144,8 +145,9 @@ class FirestoreExamReadinessRepository implements ExamReadinessRepository {
     required String quizId,
     required String attemptId,
     required List<Map<String, dynamic>> openQuestions,
-    required Map<String, String> answers,
+    required     Map<String, String> answers,
     String language = 'el',
+    String? subscriptionType,
   }) async {
     await refreshAuthTokenForCallable();
     final callable = _functions.httpsCallable(
@@ -153,7 +155,9 @@ class FirestoreExamReadinessRepository implements ExamReadinessRepository {
       options: HttpsCallableOptions(timeout: const Duration(seconds: 90)),
     );
     try {
-      final userApiKey = await _readUserApiKey();
+      final userApiKey = await _aiKeyStore.readGeminiApiKeyIfEligible(
+        subscriptionType,
+      );
       final res = await callable.call({
         'quizId': quizId,
         'attemptId': attemptId,

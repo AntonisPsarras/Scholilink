@@ -1,4 +1,3 @@
-import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import '../../../shared/l10n.dart';
@@ -6,7 +5,6 @@ import '../../../theme/app_theme.dart';
 import '../../auth/data/auth_repository.dart';
 import '../../classroom/data/classroom_providers.dart';
 import '../data/direct_message_service.dart';
-import '../domain/direct_chat_model.dart';
 import '../../auth/domain/user_model.dart';
 import 'direct_chat_screen.dart';
 import 'widgets/friendship_tiles.dart';
@@ -166,7 +164,7 @@ class FriendsView extends ConsumerWidget {
   }
 }
 
-class _FriendTile extends ConsumerStatefulWidget {
+class _FriendTile extends ConsumerWidget {
   final AppUser friend;
   final String currentUserId;
   final String lang;
@@ -179,58 +177,24 @@ class _FriendTile extends ConsumerStatefulWidget {
   });
 
   @override
-  ConsumerState<_FriendTile> createState() => _FriendTileState();
-}
+  Widget build(BuildContext context, WidgetRef ref) {
+    final chat = ref.watch(
+      directChatWithFriendProvider((currentUserId, friend.uid)),
+    );
 
-class _FriendTileState extends ConsumerState<_FriendTile> {
-  DirectChat? _chat;
-  StreamSubscription? _chatSub;
-
-  @override
-  void initState() {
-    super.initState();
-    _initChatWatch();
-  }
-
-  Future<void> _initChatWatch() async {
-    try {
-      final chatId = await ref
-          .read(directMessageServiceProvider)
-          .findDirectChatId(widget.currentUserId, widget.friend.uid);
-      if (chatId == null || !mounted) return;
-
-      _chatSub = ref
-          .read(directMessageServiceProvider)
-          .watchDirectChat(chatId)
-          .listen((chat) {
-            if (mounted) setState(() => _chat = chat);
-          });
-    } catch (e) {
-      debugPrint('_FriendTile chat watch failed: $e');
-    }
-  }
-
-  @override
-  void dispose() {
-    _chatSub?.cancel();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
     return Card(
       margin: const EdgeInsets.only(bottom: 8),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
       child: InkWell(
-        onTap: () => _openChat(context),
+        onTap: () => _openChat(context, ref),
         borderRadius: BorderRadius.circular(16),
         child: Padding(
           padding: const EdgeInsets.all(12),
           child: Row(
             children: [
               UserAvatar(
-                profilePictureUrl: widget.friend.profilePictureUrl,
-                fullName: widget.friend.fullName,
+                profilePictureUrl: friend.profilePictureUrl,
+                fullName: friend.fullName,
                 radius: 25,
               ),
               const SizedBox(width: 16),
@@ -239,15 +203,15 @@ class _FriendTileState extends ConsumerState<_FriendTile> {
                   crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Text(
-                      widget.friend.fullName,
+                      friend.fullName,
                       style: const TextStyle(
                         fontSize: 16,
                         fontWeight: FontWeight.w600,
                       ),
                     ),
-                    if (_chat != null && _chat!.lastMessageText.isNotEmpty)
+                    if (chat != null && chat.lastMessageText.isNotEmpty)
                       Text(
-                        _chat!.lastMessageText,
+                        chat.lastMessageText,
                         maxLines: 1,
                         overflow: TextOverflow.ellipsis,
                         style: TextStyle(
@@ -260,8 +224,7 @@ class _FriendTileState extends ConsumerState<_FriendTile> {
                   ],
                 ),
               ),
-              if (_chat != null &&
-                  (_chat!.unreadCounts[widget.currentUserId] ?? 0) > 0)
+              if (chat != null && (chat.unreadCounts[currentUserId] ?? 0) > 0)
                 Container(
                   padding: const EdgeInsets.all(6),
                   decoration: BoxDecoration(
@@ -269,7 +232,7 @@ class _FriendTileState extends ConsumerState<_FriendTile> {
                     shape: BoxShape.circle,
                   ),
                   child: Text(
-                    '${_chat!.unreadCounts[widget.currentUserId]}',
+                    '${chat.unreadCounts[currentUserId]}',
                     style: const TextStyle(
                       color: Colors.white,
                       fontSize: 10,
@@ -282,7 +245,7 @@ class _FriendTileState extends ConsumerState<_FriendTile> {
                   Icons.message_rounded,
                   color: context.brand.royalLavender,
                 ),
-                onPressed: () => _openChat(context),
+                onPressed: () => _openChat(context, ref),
               ),
             ],
           ),
@@ -291,16 +254,16 @@ class _FriendTileState extends ConsumerState<_FriendTile> {
     );
   }
 
-  void _openChat(BuildContext context) {
+  void _openChat(BuildContext context, WidgetRef ref) {
     Navigator.push(
       context,
       MaterialPageRoute(
         builder: (context) => DirectChatScreen(
-          friendId: widget.friend.uid,
-          currentUserId: widget.currentUserId,
-          friendName: widget.friend.fullName,
-          friendAvatar: widget.friend.profilePictureUrl,
-          lang: widget.lang,
+          friendId: friend.uid,
+          currentUserId: currentUserId,
+          friendName: friend.fullName,
+          friendAvatar: friend.profilePictureUrl,
+          lang: lang,
         ),
       ),
     );

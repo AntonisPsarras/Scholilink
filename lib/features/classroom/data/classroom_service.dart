@@ -28,10 +28,7 @@ class ClassroomService {
       'createdAt': FieldValue.serverTimestamp(),
     });
 
-    // Add to user's classroomIds
-    await _firestore.collection('users').doc(creatorId).update({
-      'classroomIds': FieldValue.arrayUnion([docRef.id]),
-    });
+    await callClassroomRegisterMembership(docRef.id);
 
     return Classroom(
       id: docRef.id,
@@ -65,16 +62,9 @@ class ClassroomService {
     }
   }
 
-  /// Leaves a classroom.
+  /// Leaves a classroom (server updates membership + Auth custom claims).
   Future<void> leaveClassroom(String classroomId, String userId) async {
-    await _firestore.collection('classrooms').doc(classroomId).update({
-      'members': FieldValue.arrayRemove([userId]),
-      'adminIds': FieldValue.arrayRemove([userId]),
-    });
-
-    await _firestore.collection('users').doc(userId).update({
-      'classroomIds': FieldValue.arrayRemove([classroomId]),
-    });
+    await callClassroomLeaveMember(classroomId);
   }
 
   /// Deletes a classroom (admin only).

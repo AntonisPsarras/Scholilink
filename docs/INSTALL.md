@@ -9,13 +9,37 @@ This guide is the **full technical path** from a clean machine to a running Scho
 ## Table of contents
 
 0. [Feature map (code parity)](FEATURES.md)
-1. [Choose your setup path](#choose-your-setup-path)
-2. [Prerequisites](#prerequisites)
-3. [Verify your toolchain](#verify-your-toolchain)
-4. [Firebase CLI login](#firebase-cli-login)
-5. [Local demo (emulators, zero cloud)](#local-demo)
-6. [Live cloud (real Firebase + Gemini)](#live-cloud)
-7. [Troubleshooting](#troubleshooting)
+1. [Firebase config for forks](#firebase-config-for-forks)
+2. [Choose your setup path](#choose-your-setup-path)
+3. [Prerequisites](#prerequisites)
+4. [Verify your toolchain](#verify-your-toolchain)
+5. [Firebase CLI login](#firebase-cli-login)
+6. [Local demo (emulators, zero cloud)](#local-demo)
+7. [Live cloud (real Firebase + Gemini)](#live-cloud)
+8. [Troubleshooting](#troubleshooting)
+
+---
+
+<a id="firebase-config-for-forks"></a>
+
+## Firebase config for forks
+
+This repository **does not** include production Firebase client credentials. The following are listed in **`.gitignore`** and will **not** be present after `git clone`:
+
+| Path | Role |
+| --- | --- |
+| `lib/firebase_options.dart` (and any `**/firebase_options.dart`) | Optional FlutterFire-generated options — **not required**; runtime init reads **`assets/.env`** via `lib/core/firebase_app_options.dart` |
+| `android/app/google-services.json` | Android native plugin config (download from **your** Firebase project) |
+| `ios/Runner/GoogleService-Info.plist` | iOS / macOS native plugin config (download from **your** project) |
+| `assets/.env` | Your private Flutter env file (copy from `assets/.env.example`) |
+
+**If you fork or clone this repo**, you must wire up **your own** Firebase project for live cloud use:
+
+1. Copy **`assets/.env.example`** → **`assets/.env`** and replace every `YOUR_*` placeholder with values from **your** Firebase console (Project settings → Your apps).
+2. Optionally download **`google-services.json`** / **`GoogleService-Info.plist`** for native targets (recommended for Android/iOS; both stay gitignored).
+3. Optionally run `flutterfire configure` to generate **`lib/firebase_options.dart`** locally — the app does not depend on that file being committed.
+
+**Committed `*.env.demo` files are emulator-only.** `assets/.env.demo` and `functions/.env.demo` use the local emulator project id **`student-dashboard-greece`** (see **`.firebaserc`**) and placeholder app IDs. They exist only for the [local demo](#local-demo) track (`USE_LOCAL_EMULATORS=true`, `LOCAL_DEMO_MODE=true`). They are **not** shared production credentials and must **not** be your sole config for a real Firebase project, store build, or public deployment.
 
 ---
 
@@ -242,12 +266,12 @@ GOOGLE_CLIENT_ID=your-oauth-client-id.apps.googleusercontent.com
 
 ### D) Add native config files (optional but recommended)
 
-Even though runtime init uses `.env`, native Firebase plugins expect their platform-specific config files for full functionality:
+Even though runtime init uses **`assets/.env`** (not a committed `firebase_options.dart`), native Firebase plugins expect platform-specific config from **your** project:
 
 - **Android:** Download `google-services.json` from Firebase Console → place at `android/app/google-services.json`
 - **iOS:** Download `GoogleService-Info.plist` → place at `ios/Runner/GoogleService-Info.plist`
 
-Both files are in `.gitignore` and must never be committed.
+These paths, `lib/firebase_options.dart`, and `assets/.env` are **gitignored** — fork each maintainer’s own copies; never commit them. See [Firebase config for forks](#firebase-config-for-forks).
 
 ### E) Configure Cloud Functions environment
 
@@ -317,9 +341,52 @@ Omitting the `--dart-define` flag also defaults to cloud mode.
 
 ---
 
+## Android release APK (sideload / test on device)
+
+```bash
+cp assets/.env.example assets/.env   # fill FIREBASE_ANDROID_* for gr.scholilink.app
+flutter build apk
+# output: build/app/outputs/flutter-apk/app-release.apk
+```
+
+**Package name:** `gr.scholilink.app` (not `com.example.*`). Play Protect often flags sideloaded `com.example` builds as suspicious.
+
+**Signing:** Release builds use `android/upload-keystore.jks` + `android/key.properties` (both gitignored). Generate once with:
+
+```powershell
+.\tools\generate_android_keystore.ps1
+```
+
+Register the keystore SHA-1 in Firebase → Project settings → **ScholiLink** Android app. **Keep the keystore safe** — every future APK must be signed with the same file or Android will refuse to upgrade in place.
+
+**Smaller APKs:** `flutter build apk --split-per-abi` (install the `arm64-v8a` build on most phones).
+
+**First install after this migration:** Uninstall any old `com.example.student_dashboard` build once. Later updates with the same keystore install normally without uninstalling.
+
+**Harmless build log noise:** `kotlin.Metadata` version notes, Java deprecation notes, and “packages have newer versions” are warnings only — the APK still builds.
+
+---
+
 ## Troubleshooting
 
 Something broke. Don't panic — it's almost certainly one of the things below.
+
+### Android: must uninstall old APK / Play Protect warning
+
+**Symptom:** Installing the new APK fails unless you delete the old app, or Google Play Protect says the app is harmful or violates Play policy.
+
+**Causes fixed in this repo:**
+
+1. **`com.example.student_dashboard`** — default Flutter ID; Play Protect treats many sideloaded `com.example` apps as untrusted.
+2. **Debug-signed release APKs** — rebuilding on another PC or mixing `flutter run` with `flutter build apk` used different debug keys, so Android treated each build as a different app.
+
+**Fix:** Use the current `gr.scholilink.app` release build signed with your persistent `upload-keystore.jks`. Update `assets/.env`:
+
+```env
+FIREBASE_ANDROID_APP_ID=1:158790888866:android:00ca9085c021735ad656fb
+```
+
+Uninstall the legacy app once, then install `app-release.apk`. Future builds with the same keystore upgrade in place.
 
 ### Demo login fails (invalid credentials or user not found)
 

@@ -45,23 +45,18 @@ final classroomHomeworkProvider =
           .watchClassroomHomework(classroomId);
     });
 
-/// Fetches friends of the current user.
+/// Fetches friends of the current user (refetches only when [AppUser.friends] changes).
 final friendsProvider = FutureProvider.autoDispose<List<AppUser>>((ref) async {
-  final authAsync = ref.watch(authStateProvider);
-
-  return authAsync.when(
-    data: (user) async {
-      if (user == null || user.friends.isEmpty) return <AppUser>[];
-      try {
-        return await ref.read(friendshipServiceProvider).getFriends(user.friends);
-      } catch (e) {
-        debugPrint('friendsProvider: $e');
-        return <AppUser>[];
-      }
-    },
-    loading: () async => <AppUser>[],
-    error: (_, __) async => <AppUser>[],
+  final friends = ref.watch(
+    authStateProvider.select((async) => async.valueOrNull?.friends),
   );
+  if (friends == null || friends.isEmpty) return <AppUser>[];
+  try {
+    return await ref.read(friendshipServiceProvider).getFriends(friends);
+  } catch (e) {
+    debugPrint('friendsProvider: $e');
+    return <AppUser>[];
+  }
 });
 
 /// UIDs of users who sent pending friend requests to the current user.

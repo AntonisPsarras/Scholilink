@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:cloud_functions/cloud_functions.dart';
 import 'package:flutter/foundation.dart';
@@ -9,6 +8,7 @@ import '../../../core/firebase_functions_helpers.dart';
 import '../../../core/ai_key_store.dart';
 import '../../../core/spark_limit_message.dart';
 import '../../../core/spark_sync.dart';
+import '../../../shared/ocr_image_bytes.dart';
 import '../../auth/data/auth_repository.dart';
 
 String _contentFromPayload(Map<Object?, Object?> p) {
@@ -107,14 +107,19 @@ class HomeworkOcrController extends StateNotifier<HomeworkOcrState> {
     state = const HomeworkOcrState(isProcessingOcr: true, error: null);
     try {
       await refreshAuthTokenForCallable();
-      final userApiKey = await _ref.read(aiKeyStoreProvider).readGeminiApiKey();
+      final userApiKey = await _ref
+          .read(aiKeyStoreProvider)
+          .readGeminiApiKeyIfEligible(
+            _ref.read(authStateProvider).valueOrNull?.subscriptionType,
+          );
       final callable = chatWithAiCallable();
+      final imageB64 = await base64EncodeImageBytesInIsolate(imageBytes);
       final response = await callable
           .call({
             'mode': 'homework_ocr',
             'prompt': userHint,
             'isJson': true,
-            'images': [base64Encode(imageBytes)],
+            'images': [imageB64],
             'availableSubjects': availableSubjects,
             'history': const <Map<String, dynamic>>[],
             if (userApiKey != null) 'userApiKey': userApiKey,

@@ -260,8 +260,14 @@ class AppTheme {
     );
   }
 
+  /// Observers required for [AnimatedLiquidBackground] route-aware pause.
+  static List<NavigatorObserver> get navigatorObservers => [
+    liquidBackgroundRouteObserver,
+  ];
+
   /// Full-screen gradient behind authenticated UI. Uses [AnimatedLiquidBackground]
-  /// with tier-based and reduced-motion static fallbacks.
+  /// with tier-based static fallbacks, route/scroll-aware pause, and per-layer
+  /// [RepaintBoundary] isolation on high-end devices.
   static Widget globalGradient({required Widget child}) {
     return AnimatedLiquidBackground(child: child);
   }

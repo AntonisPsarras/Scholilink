@@ -19,54 +19,24 @@ class DirectMessageService {
     return '${sorted[0]}__${sorted[1]}';
   }
 
-  int _chatActivityRank(Map<String, dynamic> data) {
-    final lastMessage = (data['lastMessageTime'] as Timestamp?)
-        ?.millisecondsSinceEpoch;
-    if (lastMessage != null && lastMessage > 0) {
-      return lastMessage;
+  /// Returns existing deterministic chat doc id for a pair, if any (does not create).
+  Future<String?> findDirectChatId(String user1Id, String user2Id) async {
+    final chatId = directChatDocId(user1Id, user2Id);
+    final snap = await _firestore.collection('direct_chats').doc(chatId).get();
+    if (!snap.exists) return null;
+
+    final participants = List<String>.from(snap.data()?['participants'] ?? []);
+    if (participants.length == 2 &&
+        participants.contains(user1Id) &&
+        participants.contains(user2Id)) {
+      return chatId;
     }
-    final updated = (data['updatedAt'] as Timestamp?)?.millisecondsSinceEpoch;
-    if (updated != null && updated > 0) {
-      return updated;
-    }
-    return (data['createdAt'] as Timestamp?)?.millisecondsSinceEpoch ?? 0;
-  }
-
-  /// Returns the chat doc id with the most recent activity for this pair, if any.
-  Future<String?> _findExistingDirectChatId(String user1Id, String user2Id) async {
-    final existingChats = await _firestore
-        .collection('direct_chats')
-        .where('participants', arrayContains: user1Id)
-        .get();
-
-    String? bestId;
-    var bestRank = -1;
-
-    for (final doc in existingChats.docs) {
-      final data = doc.data();
-      final participants = List<String>.from(data['participants'] ?? []);
-      if (!participants.contains(user2Id) || participants.length != 2) {
-        continue;
-      }
-
-      final rank = _chatActivityRank(data);
-      if (rank > bestRank) {
-        bestRank = rank;
-        bestId = doc.id;
-      }
-    }
-
-    return bestId;
-  }
-
-  /// Returns existing chat doc id for a pair, if any (does not create).
-  Future<String?> findDirectChatId(String user1Id, String user2Id) {
-    return _findExistingDirectChatId(user1Id, user2Id);
+    return null;
   }
 
   /// Gets or creates a direct chat between two users.
   Future<String> getOrCreateDirectChat(String user1Id, String user2Id) async {
-    final existingId = await _findExistingDirectChatId(user1Id, user2Id);
+    final existingId = await findDirectChatId(user1Id, user2Id);
     if (existingId != null) {
       return existingId;
     }
@@ -89,10 +59,9 @@ class DirectMessageService {
   /// Sends a direct message in a specific chat
   Future<void> sendDirectMessage(String chatId, DirectMessage msg) async {
     if (ProfanityFilter.containsProfanity(msg.text)) {
-      // Apply safety penalty
       await _ref
           .read(safetyServiceProvider)
-          .applyPenalty(msg.senderId, PenaltyType.profanity);
+          .applyPenaltyForText(msg.senderId, msg.text);
       throw const FormatException('profanity_detected');
     }
 
@@ -290,20 +259,44 @@ class DirectMessageService {
     });
   }
 
-  /// Watch total unread messages for a user across all chats
-  Stream<int> watchTotalUnreadCount(String userId) {
+  /// Single inbox listener for all direct chats the user participates in.
+  Stream<List<DirectChat>> watchDirectChatsInbox(String userId) {
     return _firestore
         .collection('direct_chats')
         .where('participants', arrayContains: userId)
         .snapshots()
-        .map((snap) {
-          int total = 0;
-          for (var doc in snap.docs) {
-            final unread = doc.data()['unreadCounts']?[userId] ?? 0;
-            total += (unread as num).toInt();
-          }
-          return total;
-        });
+        .map(
+          (snap) => snap.docs
+              .map((doc) => DirectChat.fromMap(doc.data(), doc.id))
+              .toList(),
+        );
+  }
+
+  static DirectChat? chatWithFriend(
+    List<DirectChat> inbox,
+    String friendUid,
+  ) {
+    for (final chat in inbox) {
+      final participants = chat.participants;
+      if (participants.length == 2 && participants.contains(friendUid)) {
+        return chat;
+      }
+    }
+    return null;
+  }
+
+  static int sumUnreadForUser(List<DirectChat> inbox, String userId) {
+    var total = 0;
+    for (final chat in inbox) {
+      total += chat.unreadCounts[userId] ?? 0;
+    }
+    return total;
+  }
+
+  /// Derived from [watchDirectChatsInbox] — do not attach a second Firestore listener.
+  Stream<int> watchTotalUnreadCount(String userId) {
+    return watchDirectChatsInbox(userId)
+        .map((inbox) => sumUnreadForUser(inbox, userId));
   }
 
   /// Deletes all messages in a direct chat and resets preview metadata.
@@ -364,10 +357,32 @@ final directChatProvider = StreamProvider.autoDispose
       return ref.watch(directMessageServiceProvider).watchDirectChat(chatId);
     });
 
-final totalUnreadCountProvider = StreamProvider.autoDispose.family<int, String>(
-  (ref, userId) {
-    return ref
-        .watch(directMessageServiceProvider)
-        .watchTotalUnreadCount(userId);
-  },
-);
+/// One cached Firestore inbox listener per user — shared by nav badge and friend tiles.
+final directChatsInboxProvider = StreamProvider.autoDispose
+    .family<List<DirectChat>, String>((ref, userId) {
+      return ref
+          .watch(directMessageServiceProvider)
+          .watchDirectChatsInbox(userId);
+    });
+
+/// Lookup a friend's chat row from the shared inbox snapshot (no extra listener).
+final directChatWithFriendProvider = Provider.autoDispose
+    .family<DirectChat?, (String userId, String friendUid)>((ref, pair) {
+      final inbox = ref.watch(directChatsInboxProvider(pair.$1));
+      return inbox.maybeWhen(
+        data: (chats) =>
+            DirectMessageService.chatWithFriend(chats, pair.$2),
+        orElse: () => null,
+      );
+    });
+
+final totalUnreadCountProvider = Provider.autoDispose.family<int, String>((
+  ref,
+  userId,
+) {
+  final inbox = ref.watch(directChatsInboxProvider(userId));
+  return inbox.maybeWhen(
+    data: (chats) => DirectMessageService.sumUnreadForUser(chats, userId),
+    orElse: () => 0,
+  );
+});

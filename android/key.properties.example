@@ -1,0 +1,6 @@
+# Copy to android/key.properties and fill in after generating upload-keystore.jks
+# (see tools/generate_android_keystore.ps1). Never commit key.properties or *.jks.
+storePassword=YOUR_STORE_PASSWORD
+keyPassword=YOUR_KEY_PASSWORD
+keyAlias=upload
+storeFile=upload-keystore.jks

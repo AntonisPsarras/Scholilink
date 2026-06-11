@@ -102,11 +102,26 @@ Future<Map<String, dynamic>> callClassroomJoinWithInviteCode(
   final res = await _callable('classroomJoinWithInviteCode').call({
     'inviteCode': inviteCode,
   });
+  await refreshAuthTokenForCallable();
   final data = res.data;
   if (data is Map) {
     return Map<String, dynamic>.from(data);
   }
   return {'ok': false};
+}
+
+Future<void> callClassroomLeaveMember(String classroomId) async {
+  await refreshAuthTokenForCallable();
+  await _callable('classroomLeaveMember').call({'classroomId': classroomId});
+  await refreshAuthTokenForCallable();
+}
+
+Future<void> callClassroomRegisterMembership(String classroomId) async {
+  await refreshAuthTokenForCallable();
+  await _callable('classroomRegisterMembership').call({
+    'classroomId': classroomId,
+  });
+  await refreshAuthTokenForCallable();
 }
 
 Future<void> callUpdateStudentCurrentClass(String currentClass) async {

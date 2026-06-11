@@ -84,7 +84,10 @@ class FirebaseAuthRepository implements AuthRepository {
         currentClass: 'A-Lykeio-General', // Default class
         absences: 0,
       );
-      await _firestore.collection('users').doc(user.uid).set(appUser.toMap());
+      await _firestore
+          .collection('users')
+          .doc(user.uid)
+          .set(appUser.toClientWriteMap());
       await mergeUserPublicProfile(_firestore, appUser);
     }
   }
@@ -130,7 +133,10 @@ class FirebaseAuthRepository implements AuthRepository {
               null, // Always use null so the initial-based avatar is shown
           absences: 0,
         );
-        await _firestore.collection('users').doc(user.uid).set(appUser.toMap());
+        await _firestore
+            .collection('users')
+            .doc(user.uid)
+            .set(appUser.toClientWriteMap());
         await mergeUserPublicProfile(_firestore, appUser);
       }
       // Removed the else block that updated profilePictureUrl, to ensure
@@ -156,7 +162,7 @@ class FirebaseAuthRepository implements AuthRepository {
     await _firestore
         .collection('users')
         .doc(user.uid)
-        .set(user.toMap(), SetOptions(merge: true));
+        .set(user.toClientWriteMap(), SetOptions(merge: true));
     await mergeUserPublicProfile(_firestore, user);
   }
 
@@ -375,10 +381,6 @@ final authStateProvider = StreamProvider.autoDispose<AppUser?>((ref) {
       .map((snapshot) {
             if (snapshot.exists) {
               final appUser = AppUser.fromMap(snapshot.data()!);
-
-              unawaited(
-                mergeUserPublicProfile(FirebaseFirestore.instance, appUser),
-              );
 
               // Lazy migration: Update older DiceBear avatar styles to a neutral non-face style when the user logs in.
               // This is safe and fires an update to Firestore, which then triggers a new stream event.

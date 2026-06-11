@@ -4,6 +4,25 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 /// and Firestore rules (`userCurrentClass`) so exams, deadlines, and schedules stay consistent.
 const String kAppDefaultCurrentClassId = 'A-Lykeio-General';
 
+/// Firestore `users/{uid}` fields clients must never write.
+/// Privileged defaults are applied by `initializeUserPrivilegedFields` on first document create.
+const Set<String> kServerOnlyUserFieldKeys = {
+  'aiSparks',
+  'subscriptionType',
+  'lastSparksRefresh',
+  'safetyScore',
+  'offenseCount',
+  'reportsCount',
+  'isBannedUntil',
+  'consentToken',
+  'parentEmail',
+  'consentVerificationStatus',
+  'hasParentalConsent',
+  'friends',
+  'birthDate',
+  'classroomIds',
+};
+
 class AppUser {
   final String uid;
   final String email;
@@ -102,6 +121,15 @@ class AppUser {
     this.notifyInactivity = true,
     this.notifyClassUpdates = true,
   });
+
+  /// Subset of [toMap] safe for client Firestore writes (signup + profile merge).
+  Map<String, dynamic> toClientWriteMap() {
+    final map = toMap();
+    for (final key in kServerOnlyUserFieldKeys) {
+      map.remove(key);
+    }
+    return map;
+  }
 
   Map<String, dynamic> toMap() {
     return {

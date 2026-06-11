@@ -234,7 +234,13 @@ class _DesktopSocialSidebarState extends ConsumerState<DesktopSocialSidebar> {
                   child: ClipRRect(
                     borderRadius: BorderRadius.circular(20),
                     child: _selectedTab == 0
-                        ? _buildAiChatTab(s, user)
+                        ? _DesktopAiChatTab(
+                            s: s,
+                            chatController: _chatController,
+                            chatScrollController: _chatScrollController,
+                            isAiSending: _isAiSending,
+                            onSend: _sendChatMessage,
+                          )
                         : _selectedTab == 1
                         ? _buildSmartNotesTab(s)
                         : _buildAddExamTab(s, user),
@@ -287,227 +293,6 @@ class _DesktopSocialSidebarState extends ConsumerState<DesktopSocialSidebar> {
                 ),
               ),
             ],
-          ),
-        ),
-      ),
-    );
-  }
-
-  // ── AI Chat Tab ─────────────────────────────────────────────────────────────
-  Widget _buildAiChatTab(S s, AppUser user) {
-    final messages = ref.watch(chatProvider);
-    return Column(
-      children: [
-        // Header with expand button
-        Padding(
-          padding: const EdgeInsets.fromLTRB(14, 12, 8, 4),
-          child: Row(
-            children: [
-              Icon(
-                Icons.auto_awesome,
-                size: 15,
-                color: context.brand.royalLavender,
-              ),
-              const SizedBox(width: 6),
-              Expanded(
-                child: Text(
-                  s.lang == 'el' ? 'AI Βοηθός' : 'AI Assistant',
-                  style: const TextStyle(
-                    fontWeight: FontWeight.bold,
-                    fontSize: 13,
-                  ),
-                ),
-              ),
-              IconButton(
-                icon: Icon(
-                  Icons.open_in_new,
-                  size: 16,
-                  color: context.brand.neutralGrey,
-                ),
-                tooltip: s.lang == 'el' ? 'Άνοιγμα' : 'Open',
-                onPressed: () => Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (_) => const StudyBuddyScreen()),
-                ),
-                padding: const EdgeInsets.all(4),
-                constraints: const BoxConstraints(),
-              ),
-            ],
-          ),
-        ),
-        const Divider(height: 1),
-
-        // Messages list
-        Expanded(
-          child: messages.isEmpty
-              ? Center(
-                  child: Padding(
-                    padding: const EdgeInsets.all(16),
-                    child: Column(
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Icon(
-                          Icons.smart_toy_outlined,
-                          size: 36,
-                          color: context.brand.neutralGrey.withValues(
-                            alpha: 0.4,
-                          ),
-                        ),
-                        const SizedBox(height: 10),
-                        Text(
-                          s.lang == 'el'
-                              ? 'Ρώτησέ με οτιδήποτε!'
-                              : 'Ask me anything!',
-                          textAlign: TextAlign.center,
-                          style: TextStyle(
-                            color: context.brand.neutralGrey,
-                            fontSize: 12,
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                )
-              : ListView.builder(
-                  controller: _chatScrollController,
-                  padding: const EdgeInsets.symmetric(
-                    horizontal: 12,
-                    vertical: 8,
-                  ),
-                  itemCount: messages.length,
-                  itemBuilder: (context, i) => _buildChatBubble(messages[i]),
-                ),
-        ),
-
-        // Loading indicator when AI is thinking
-        if (_isAiSending)
-          Padding(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
-            child: Row(
-              children: [
-                SizedBox(
-                  width: 14,
-                  height: 14,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 1.5,
-                    color: context.brand.royalLavender,
-                  ),
-                ),
-                const SizedBox(width: 8),
-                Text(
-                  s.lang == 'el' ? 'Σκέφτομαι...' : 'Thinking...',
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: context.brand.neutralGrey,
-                  ),
-                ),
-              ],
-            ),
-          ),
-
-        // Input field
-        Padding(
-          padding: const EdgeInsets.fromLTRB(10, 6, 10, 10),
-          child: Row(
-            children: [
-              Expanded(
-                child: TextField(
-                  controller: _chatController,
-                  style: const TextStyle(fontSize: 13),
-                  maxLines: null,
-                  textInputAction: TextInputAction.send,
-                  onSubmitted: (_) => _sendChatMessage(),
-                  decoration: InputDecoration(
-                    hintText: s.lang == 'el'
-                        ? 'Γράψε μήνυμα...'
-                        : 'Type a message...',
-                    hintStyle: TextStyle(
-                      fontSize: 12,
-                      color: context.brand.neutralGrey,
-                    ),
-                    isDense: true,
-                    contentPadding: const EdgeInsets.symmetric(
-                      horizontal: 12,
-                      vertical: 8,
-                    ),
-                    border: OutlineInputBorder(
-                      borderRadius: BorderRadius.circular(12),
-                      borderSide: BorderSide.none,
-                    ),
-                    filled: true,
-                    fillColor: Colors.white.withValues(alpha: 0.6),
-                  ),
-                ),
-              ),
-              const SizedBox(width: 6),
-              // Send button — shows CircularProgressIndicator while thinking
-              AnimatedSwitcher(
-                duration: const Duration(milliseconds: 200),
-                child: _isAiSending
-                    ? SizedBox(
-                        key: const ValueKey('loading'),
-                        width: 36,
-                        height: 36,
-                        child: Center(
-                          child: SizedBox(
-                            width: 18,
-                            height: 18,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              color: context.brand.royalLavender,
-                            ),
-                          ),
-                        ),
-                      )
-                    : GestureDetector(
-                        key: const ValueKey('send'),
-                        onTap: _sendChatMessage,
-                        child: Container(
-                          width: 36,
-                          height: 36,
-                          decoration: BoxDecoration(
-                            color: context.brand.royalLavender,
-                            borderRadius: BorderRadius.circular(10),
-                          ),
-                          child: const Icon(
-                            Icons.send_rounded,
-                            size: 16,
-                            color: Colors.white,
-                          ),
-                        ),
-                      ),
-              ),
-            ],
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildChatBubble(AIChatMessage message) {
-    final isUser = message.isUser;
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: Align(
-        alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
-        child: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 220),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
-            decoration: BoxDecoration(
-              color: isUser
-                  ? context.brand.royalLavender.withValues(alpha: 0.85)
-                  : Colors.white.withValues(alpha: 0.8),
-              borderRadius: BorderRadius.circular(12),
-            ),
-            child: Text(
-              message.text,
-              style: TextStyle(
-                fontSize: 12,
-                color: isUser ? Colors.white : context.brand.darkText,
-                height: 1.4,
-              ),
-            ),
           ),
         ),
       ),
@@ -960,6 +745,246 @@ class _DesktopSocialSidebarState extends ConsumerState<DesktopSocialSidebar> {
           ),
         ),
       ],
+    );
+  }
+}
+
+/// Isolated AI chat tab — [chatProvider] watch scoped here so message
+/// streaming does not rebuild the profile card or tab bar.
+class _DesktopAiChatTab extends ConsumerWidget {
+  final S s;
+  final TextEditingController chatController;
+  final ScrollController chatScrollController;
+  final bool isAiSending;
+  final VoidCallback onSend;
+
+  const _DesktopAiChatTab({
+    required this.s,
+    required this.chatController,
+    required this.chatScrollController,
+    required this.isAiSending,
+    required this.onSend,
+  });
+
+  @override
+  Widget build(BuildContext context, WidgetRef ref) {
+    final messages = ref.watch(chatProvider);
+
+    return Column(
+      children: [
+        Padding(
+          padding: const EdgeInsets.fromLTRB(14, 12, 8, 4),
+          child: Row(
+            children: [
+              Icon(
+                Icons.auto_awesome,
+                size: 15,
+                color: context.brand.royalLavender,
+              ),
+              const SizedBox(width: 6),
+              Expanded(
+                child: Text(
+                  s.lang == 'el' ? 'AI Βοηθός' : 'AI Assistant',
+                  style: const TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 13,
+                  ),
+                ),
+              ),
+              IconButton(
+                icon: Icon(
+                  Icons.open_in_new,
+                  size: 16,
+                  color: context.brand.neutralGrey,
+                ),
+                tooltip: s.lang == 'el' ? 'Άνοιγμα' : 'Open',
+                onPressed: () => Navigator.push(
+                  context,
+                  MaterialPageRoute(builder: (_) => const StudyBuddyScreen()),
+                ),
+                padding: const EdgeInsets.all(4),
+                constraints: const BoxConstraints(),
+              ),
+            ],
+          ),
+        ),
+        const Divider(height: 1),
+        Expanded(
+          child: messages.isEmpty
+              ? Center(
+                  child: Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        Icon(
+                          Icons.smart_toy_outlined,
+                          size: 36,
+                          color: context.brand.neutralGrey.withValues(
+                            alpha: 0.4,
+                          ),
+                        ),
+                        const SizedBox(height: 10),
+                        Text(
+                          s.lang == 'el'
+                              ? 'Ρώτησέ με οτιδήποτε!'
+                              : 'Ask me anything!',
+                          textAlign: TextAlign.center,
+                          style: TextStyle(
+                            color: context.brand.neutralGrey,
+                            fontSize: 12,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                )
+              : ListView.builder(
+                  controller: chatScrollController,
+                  padding: const EdgeInsets.symmetric(
+                    horizontal: 12,
+                    vertical: 8,
+                  ),
+                  itemCount: messages.length,
+                  itemBuilder: (context, i) =>
+                      _DesktopAiChatBubble(message: messages[i]),
+                ),
+        ),
+        if (isAiSending)
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+            child: Row(
+              children: [
+                SizedBox(
+                  width: 14,
+                  height: 14,
+                  child: CircularProgressIndicator(
+                    strokeWidth: 1.5,
+                    color: context.brand.royalLavender,
+                  ),
+                ),
+                const SizedBox(width: 8),
+                Text(
+                  s.lang == 'el' ? 'Σκέφτομαι...' : 'Thinking...',
+                  style: TextStyle(
+                    fontSize: 11,
+                    color: context.brand.neutralGrey,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        Padding(
+          padding: const EdgeInsets.fromLTRB(10, 6, 10, 10),
+          child: Row(
+            children: [
+              Expanded(
+                child: TextField(
+                  controller: chatController,
+                  style: const TextStyle(fontSize: 13),
+                  maxLines: null,
+                  textInputAction: TextInputAction.send,
+                  onSubmitted: (_) => onSend(),
+                  decoration: InputDecoration(
+                    hintText: s.lang == 'el'
+                        ? 'Γράψε μήνυμα...'
+                        : 'Type a message...',
+                    hintStyle: TextStyle(
+                      fontSize: 12,
+                      color: context.brand.neutralGrey,
+                    ),
+                    isDense: true,
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 8,
+                    ),
+                    border: OutlineInputBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      borderSide: BorderSide.none,
+                    ),
+                    filled: true,
+                    fillColor: Colors.white.withValues(alpha: 0.6),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 6),
+              AnimatedSwitcher(
+                duration: const Duration(milliseconds: 200),
+                child: isAiSending
+                    ? SizedBox(
+                        key: const ValueKey('loading'),
+                        width: 36,
+                        height: 36,
+                        child: Center(
+                          child: SizedBox(
+                            width: 18,
+                            height: 18,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              color: context.brand.royalLavender,
+                            ),
+                          ),
+                        ),
+                      )
+                    : GestureDetector(
+                        key: const ValueKey('send'),
+                        onTap: onSend,
+                        child: Container(
+                          width: 36,
+                          height: 36,
+                          decoration: BoxDecoration(
+                            color: context.brand.royalLavender,
+                            borderRadius: BorderRadius.circular(10),
+                          ),
+                          child: const Icon(
+                            Icons.send_rounded,
+                            size: 16,
+                            color: Colors.white,
+                          ),
+                        ),
+                      ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+}
+
+class _DesktopAiChatBubble extends StatelessWidget {
+  final AIChatMessage message;
+
+  const _DesktopAiChatBubble({required this.message});
+
+  @override
+  Widget build(BuildContext context) {
+    final isUser = message.isUser;
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Align(
+        alignment: isUser ? Alignment.centerRight : Alignment.centerLeft,
+        child: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 220),
+          child: Container(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+            decoration: BoxDecoration(
+              color: isUser
+                  ? context.brand.royalLavender.withValues(alpha: 0.85)
+                  : Colors.white.withValues(alpha: 0.8),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: Text(
+              message.text,
+              style: TextStyle(
+                fontSize: 12,
+                color: isUser ? Colors.white : context.brand.darkText,
+                height: 1.4,
+              ),
+            ),
+          ),
+        ),
+      ),
     );
   }
 }

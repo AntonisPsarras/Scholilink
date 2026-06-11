@@ -1,30 +1,27 @@
-import 'dart:typed_data';
-
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../../../../shared/image_utils.dart';
 import '../../../../theme/app_theme.dart';
 
 /// Inline chat image that preserves aspect ratio within bubble width.
-class ChatInlineImage extends StatelessWidget {
+class ChatInlineImage extends ConsumerWidget {
   const ChatInlineImage({
     super.key,
     required this.url,
     required this.heroTag,
     required this.onTap,
-    this.decodedBytes,
     this.errorLabel = 'Error loading',
   });
 
   final String url;
   final String heroTag;
   final VoidCallback onTap;
-  final Uint8List? decodedBytes;
   final String errorLabel;
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final maxWidth = MediaQuery.sizeOf(context).width * 0.55;
     const maxHeight = 280.0;
     final dpr = MediaQuery.devicePixelRatioOf(context);
@@ -32,12 +29,28 @@ class ChatInlineImage extends StatelessWidget {
 
     final Widget image;
     if (isBase64DataUri(url)) {
-      final bytes =
-          decodedBytes ?? Uint8List.fromList(decodeBase64DataUri(url));
-      image = Image.memory(
-        bytes,
-        fit: BoxFit.contain,
-        filterQuality: FilterQuality.medium,
+      final bytesAsync = ref.watch(base64ChatImageBytesProvider(url));
+      image = bytesAsync.when(
+        data: (bytes) => Image.memory(
+          bytes,
+          fit: BoxFit.contain,
+          filterQuality: FilterQuality.medium,
+          cacheWidth: memW,
+        ),
+        loading: () => SizedBox(
+          width: maxWidth,
+          height: 120,
+          child: Center(
+            child: CircularProgressIndicator(
+              strokeWidth: 2,
+              color: context.brand.royalLavender.withValues(alpha: 0.6),
+            ),
+          ),
+        ),
+        error: (_, __) => _ImageErrorPlaceholder(
+          maxWidth: maxWidth,
+          label: errorLabel,
+        ),
       );
     } else {
       image = CachedNetworkImage(

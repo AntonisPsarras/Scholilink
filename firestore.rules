@@ -2,9 +2,9 @@ rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
 
-    // Align with client [kAppDefaultCurrentClassId] when profile field is unset.
-    // Must not call get() on a missing user doc — that fails the whole rule check.
-    function userCurrentClass() {
+    // Grade band from Auth custom claims (synced by Cloud Functions). Fallback to user doc
+    // only while claims are absent (migration / first session).
+    function userCurrentClassFromProfile() {
       let p = /databases/$(database)/documents/users/$(request.auth.uid);
       return exists(p)
         ? (
@@ -15,8 +15,40 @@ service cloud.firestore {
         : 'A-Lykeio-General';
     }
 
-    function classroomDoc(classroomId) {
-      return get(/databases/$(database)/documents/classrooms/$(classroomId)).data;
+    function userCurrentClass() {
+      return ('currentClass' in request.auth.token
+        && request.auth.token.currentClass is string
+        && request.auth.token.currentClass.size() > 0)
+        ? request.auth.token.currentClass
+        : userCurrentClassFromProfile();
+    }
+
+    // Classroom membership from Auth custom claims (`classroomIds`). Fallback to classroom
+    // doc `members` only while claims are absent.
+    function isClassroomMember(classroomId) {
+      return ('classroomIds' in request.auth.token
+        && request.auth.token.classroomIds is list
+        && classroomId in request.auth.token.classroomIds)
+        || (
+          !('classroomIds' in request.auth.token)
+          && exists(/databases/$(database)/documents/classrooms/$(classroomId))
+          && request.auth.uid in get(/databases/$(database)/documents/classrooms/$(classroomId)).data.get('members', [])
+        );
+    }
+
+    // Deterministic direct-chat ids (`uid1__uid2`) avoid a parent `get()` on messages.
+    function directChatParticipants(chatId) {
+      let parts = chatId.split('__');
+      return parts.size() == 2
+        && parts[0].size() > 0
+        && parts[1].size() > 0
+        && (request.auth.uid == parts[0] || request.auth.uid == parts[1])
+        ? parts
+        : get(/databases/$(database)/documents/direct_chats/$(chatId)).data.get('participants', []);
+    }
+
+    function isDirectChatParticipant(chatId) {
+      return request.auth.uid in directChatParticipants(chatId);
     }
 
     function scheduleParentClass(scheduleId) {
@@ -121,7 +153,10 @@ service cloud.firestore {
         && request.auth.uid == userId
         && request.resource.data.uid == userId
         && userPublicKeysOk()
-        && !request.resource.data.diff(resource.data).affectedKeys().hasAny(['currentClass']);
+        && !request.resource.data.diff(resource.data).affectedKeys().hasAny([
+              'currentClass',
+              'schoolRole'
+            ]);
       allow delete: if request.auth != null && request.auth.uid == userId;
     }
 
@@ -129,9 +164,27 @@ service cloud.firestore {
       allow read: if request.auth != null && request.auth.uid == userId;
 
       // schoolRole must be 'student' on self-create; elevation to 'teacher' is server-only.
+      // classroomIds is server-maintained (membership callables + triggers).
+      // Privileged defaults (billing, moderation, consent, friends) are set by Cloud Functions on create.
       allow create: if request.auth != null && request.auth.uid == userId
                     && (!('schoolRole' in request.resource.data)
-                        || request.resource.data.schoolRole == 'student');
+                        || request.resource.data.schoolRole == 'student')
+                    && (!('classroomIds' in request.resource.data)
+                        || request.resource.data.classroomIds.size() == 0)
+                    && !request.resource.data.keys().hasAny([
+                          'aiSparks',
+                          'subscriptionType',
+                          'lastSparksRefresh',
+                          'safetyScore',
+                          'offenseCount',
+                          'reportsCount',
+                          'isBannedUntil',
+                          'consentToken',
+                          'parentEmail',
+                          'consentVerificationStatus',
+                          'hasParentalConsent',
+                          'friends'
+                        ]);
 
       // Block client writes to server-controlled billing, AI quota, moderation, consent,
       // compliance, and currentClass (grade band changes go through Cloud Functions).
@@ -151,7 +204,8 @@ service cloud.firestore {
                           'hasParentalConsent',
                           'birthDate',
                           'schoolRole',
-                          'currentClass'
+                          'currentClass',
+                          'classroomIds'
                         ]);
 
       match /{document=**} {
@@ -267,16 +321,16 @@ service cloud.firestore {
 
       match /homework_feed/{postId} {
         allow read: if request.auth != null
-          && request.auth.uid in classroomDoc(classroomId).members;
+          && isClassroomMember(classroomId);
         allow create: if request.auth != null
           && userNotBanned()
-          && request.auth.uid in classroomDoc(classroomId).members
+          && isClassroomMember(classroomId)
           && request.resource.data.authorId == request.auth.uid;
         allow delete: if request.auth != null
-          && request.auth.uid in classroomDoc(classroomId).members
+          && isClassroomMember(classroomId)
           && resource.data.authorId == request.auth.uid;
         allow update: if request.auth != null
-          && request.auth.uid in classroomDoc(classroomId).members
+          && isClassroomMember(classroomId)
           && resource.data.authorId == request.resource.data.authorId
           && (
             (
@@ -298,17 +352,17 @@ service cloud.firestore {
       }
 
       match /messages/{messageId} {
-        allow read: if request.auth != null && request.auth.uid in classroomDoc(classroomId).members;
+        allow read: if request.auth != null && isClassroomMember(classroomId);
         allow create: if request.auth != null
           && userNotBanned()
-          && request.auth.uid in classroomDoc(classroomId).members
+          && isClassroomMember(classroomId)
           && request.resource.data.authorId == request.auth.uid;
         allow delete: if request.auth != null
-          && request.auth.uid in classroomDoc(classroomId).members
+          && isClassroomMember(classroomId)
           && resource.data.authorId == request.auth.uid;
         // Author may edit/delete own messages; peers may verify/disapprove academic posts.
         allow update: if request.auth != null
-          && request.auth.uid in classroomDoc(classroomId).members
+          && isClassroomMember(classroomId)
           && request.resource.data.authorId == resource.data.authorId
           && (
             resource.data.authorId == request.auth.uid
@@ -322,16 +376,16 @@ service cloud.firestore {
 
       match /polls/{pollId} {
         allow read: if request.auth != null
-          && request.auth.uid in classroomDoc(classroomId).members;
+          && isClassroomMember(classroomId);
         allow create: if request.auth != null
           && userNotBanned()
-          && request.auth.uid in classroomDoc(classroomId).members
+          && isClassroomMember(classroomId)
           && request.resource.data.creatorId == request.auth.uid;
         allow delete: if request.auth != null
-          && request.auth.uid in classroomDoc(classroomId).members
+          && isClassroomMember(classroomId)
           && resource.data.creatorId == request.auth.uid;
         allow update: if request.auth != null
-          && request.auth.uid in classroomDoc(classroomId).members
+          && isClassroomMember(classroomId)
           && resource.data.creatorId == request.resource.data.creatorId
           && request.resource.data.diff(resource.data).affectedKeys().hasOnly(['options']);
       }
@@ -364,22 +418,20 @@ service cloud.firestore {
 
       match /messages/{messageId} {
         allow read: if request.auth != null
-          && request.auth.uid in get(/databases/$(database)/documents/direct_chats/$(chatId)).data.participants;
+          && isDirectChatParticipant(chatId);
         allow create: if request.auth != null
           && userNotBanned()
-          && request.auth.uid in get(/databases/$(database)/documents/direct_chats/$(chatId)).data.participants
+          && isDirectChatParticipant(chatId)
           && request.auth.uid == request.resource.data.senderId
           && usersAreFriends(
-            directChatOtherParticipant(
-              get(/databases/$(database)/documents/direct_chats/$(chatId)).data.participants
-            )
+            directChatOtherParticipant(directChatParticipants(chatId))
           );
         allow update: if request.auth != null
-          && request.auth.uid in get(/databases/$(database)/documents/direct_chats/$(chatId)).data.participants
+          && isDirectChatParticipant(chatId)
           && resource.data.senderId == request.auth.uid;
         // Allow either participant to clear conversation history.
         allow delete: if request.auth != null
-          && request.auth.uid in get(/databases/$(database)/documents/direct_chats/$(chatId)).data.participants;
+          && isDirectChatParticipant(chatId);
       }
     }
 

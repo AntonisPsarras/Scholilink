@@ -20,6 +20,7 @@ import 'features/auth/presentation/auth_wrapper.dart';
 @pragma('vm:entry-point')
 Future<void> _firebaseMessagingBackgroundHandler(RemoteMessage message) async {
   final app = await _initializeFirebaseApp();
+  await activateFirebaseAppCheck();
   await configureFirebaseRuntime(app: app);
 }
 
@@ -94,6 +95,7 @@ void main() async {
   PerformanceConfig.initialize();
 
   final app = await _initializeFirebaseApp();
+  await activateFirebaseAppCheck();
   await configureFirebaseRuntime(app: app);
   FirebaseMessaging.onBackgroundMessage(_firebaseMessagingBackgroundHandler);
 
@@ -114,6 +116,7 @@ class StudentDashboardApp extends ConsumerWidget {
     final appLocale = ref.watch(appLocaleProvider);
     return MaterialApp(
       title: 'ScholiLink',
+      navigatorObservers: AppTheme.navigatorObservers,
       debugShowCheckedModeBanner: false,
       theme: AppTheme.lightTheme,
       darkTheme: AppTheme.darkTheme,

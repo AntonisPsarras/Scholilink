@@ -75,6 +75,13 @@ class Config {
     'GOOGLE_WEB_CLIENT_ID',
   ], 'YOUR_CLIENT_ID');
 
+  /// reCAPTCHA v3 site key for Firebase App Check on web (Firebase Console → App Check).
+  static String get firebaseAppCheckRecaptchaSiteKey => _envFirst(
+    'FIREBASE_APP_CHECK_RECAPTCHA_SITE_KEY',
+    const [],
+    'YOUR_RECAPTCHA_SITE_KEY',
+  );
+
   static bool _toBool(String raw, {required bool fallback}) {
     final v = raw.trim().toLowerCase();
     if (v.isEmpty) return fallback;

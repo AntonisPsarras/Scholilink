@@ -1,4 +1,6 @@
 // ignore_for_file: deprecated_member_use
+import 'dart:async';
+
 import 'package:firebase_auth/firebase_auth.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -17,6 +19,10 @@ import '../domain/ai_chat_models.dart';
 
 // Provide a way to track the active session ID
 final activeChatSessionIdProvider = StateProvider<String?>((ref) => null);
+
+/// Typing flag isolated from [chatProvider] so UI can rebuild the indicator
+/// without reconstructing chrome (sidebar, header, composer).
+final chatIsTypingProvider = StateProvider<bool>((ref) => false);
 
 class ChatNotifier extends StateNotifier<List<AIChatMessage>> {
   final Ref _ref;
@@ -43,6 +49,7 @@ class ChatNotifier extends StateNotifier<List<AIChatMessage>> {
   Future<void> loadSession(String? sessionId) async {
     _sessionId = sessionId;
     state = []; // Clear current state while loading
+    _setTyping(false);
     await _loadHistory();
   }
 
@@ -59,6 +66,20 @@ class ChatNotifier extends StateNotifier<List<AIChatMessage>> {
   void clearChat() {
     _sessionId = null;
     state = [];
+    _setTyping(false);
+  }
+
+  void _setTyping(bool value) {
+    isTyping = value;
+    _ref.read(chatIsTypingProvider.notifier).state = value;
+  }
+
+  void _dropEmptyStreamingBot(String botId) {
+    if (!mounted) return;
+    state = [
+      for (final m in state)
+        if (m.id != botId || m.text.isNotEmpty) m,
+    ];
   }
 
   // Maximum characters accepted per message. Prevents resource-exhaustion via
@@ -108,8 +129,12 @@ class ChatNotifier extends StateNotifier<List<AIChatMessage>> {
 
     if (mounted) {
       state = [...state, tempMessage];
-      isTyping = true;
+      _setTyping(true);
     }
+
+    final streamId = 'stream-${DateTime.now().millisecondsSinceEpoch}';
+    final botId = 'bot-$streamId';
+    StreamSubscription<String>? streamSub;
 
     try {
       String sessionId = _sessionId ?? '';
@@ -146,7 +171,36 @@ class ChatNotifier extends StateNotifier<List<AIChatMessage>> {
       final history = await runAiIsolate(buildStudyBuddyCallableHistory, {
         'systemUser': systemUser,
         'turns': turns,
+        'maxTurns': aiCallableMaxHistoryTurns,
       });
+
+      if (mounted) {
+        state = [
+          ...state,
+          AIChatMessage(
+            id: botId,
+            text: '',
+            isUser: false,
+            createdAt: DateTime.now(),
+          ),
+        ];
+        streamSub = watchAiStreamChunk(_user.uid, streamId).listen((partial) {
+          if (!mounted || partial.isEmpty) return;
+          _setTyping(false);
+          state = [
+            for (final m in state)
+              if (m.id == botId)
+                AIChatMessage(
+                  id: botId,
+                  text: partial,
+                  isUser: false,
+                  createdAt: m.createdAt,
+                )
+              else
+                m,
+          ];
+        });
+      }
 
       Config.debugLogAiEnvSnapshot('Chat');
       final envErr = Config.firebaseEnvErrorForAiIfAny();
@@ -173,7 +227,9 @@ class ChatNotifier extends StateNotifier<List<AIChatMessage>> {
         );
       }
       final callable = chatWithAiCallable();
-      final userApiKey = await _ref.read(aiKeyStoreProvider).readGeminiApiKey();
+      final userApiKey = await _ref
+          .read(aiKeyStoreProvider)
+          .readGeminiApiKeyIfEligible(_user.subscriptionType);
 
       final base64Images = await runAiIsolate(encodeImagesToBase64, images);
 
@@ -183,6 +239,7 @@ class ChatNotifier extends StateNotifier<List<AIChatMessage>> {
         'isJson': false,
         'mode': 'chat',
         'images': base64Images,
+        'streamId': streamId,
         if (userApiKey != null) 'userApiKey': userApiKey,
       });
 
@@ -199,14 +256,32 @@ class ChatNotifier extends StateNotifier<List<AIChatMessage>> {
       if (responseText != null) {
         await _repository.addMessage(_user.uid, sessionId, responseText, false);
 
-        final botMessage = AIChatMessage(
-          id: 'bot-${DateTime.now().millisecondsSinceEpoch}',
-          text: responseText,
-          isUser: false,
-          createdAt: DateTime.now(),
-        );
         if (mounted) {
-          state = [...state, botMessage];
+          final hasBotPlaceholder = state.any((m) => m.id == botId);
+          if (hasBotPlaceholder) {
+            state = [
+              for (final m in state)
+                if (m.id == botId)
+                  AIChatMessage(
+                    id: botId,
+                    text: responseText,
+                    isUser: false,
+                    createdAt: m.createdAt,
+                  )
+                else
+                  m,
+            ];
+          } else {
+            state = [
+              ...state,
+              AIChatMessage(
+                id: botId,
+                text: responseText,
+                isUser: false,
+                createdAt: DateTime.now(),
+              ),
+            ];
+          }
         }
 
         return sessionId;
@@ -239,6 +314,7 @@ class ChatNotifier extends StateNotifier<List<AIChatMessage>> {
         'AI Chat Error: code=${e.code} message=${e.message} details=${e.details}',
       );
       if (mounted) {
+        _dropEmptyStreamingBot(botId);
         state = [
           ...state,
           AIChatMessage(
@@ -261,6 +337,7 @@ class ChatNotifier extends StateNotifier<List<AIChatMessage>> {
       }
 
       if (mounted) {
+        _dropEmptyStreamingBot(botId);
         state = [
           ...state,
           AIChatMessage(
@@ -274,8 +351,12 @@ class ChatNotifier extends StateNotifier<List<AIChatMessage>> {
       debugPrint('AI Chat Error: $e');
       return null;
     } finally {
+      await streamSub?.cancel();
+      try {
+        await aiStreamChunkDocRef(_user.uid, streamId).delete();
+      } catch (_) {}
       if (mounted) {
-        isTyping = false;
+        _setTyping(false);
       }
     }
   }
