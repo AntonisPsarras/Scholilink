@@ -770,6 +770,7 @@ class _SmartNotesScreenState extends ConsumerState<SmartNotesScreen> {
                       if (!mounted) return;
                       _textController.clear();
                       setState(() => _selectedImages.clear());
+                      if (!context.mounted) return;
                       FocusScope.of(context).unfocus();
 
                       await ref

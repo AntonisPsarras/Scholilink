@@ -91,7 +91,6 @@ flutter:
     - assets/.env
     - assets/.env.example
     - assets/google_fonts/
-    - assets/images/
     - assets/branding/
     - assets/avatars/avatar_mountain.svg
     - assets/avatars/avatar_sailboat.svg
